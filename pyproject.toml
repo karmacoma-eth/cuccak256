@@ -1,0 +1,18 @@
+[project]
+name = "cuccak256"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numba>=0.60.0",
+    "numpy>=2.0.2",
+    "pytest>=8.3.3",
+    "ruff>=0.7.3",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+pythonpath = [ "src" ]
