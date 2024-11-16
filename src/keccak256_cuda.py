@@ -71,29 +71,22 @@ def _keccak_f(state: array) -> array:
     Returns:
         device array: The updated state array after permutation
     """
-    # Temporary array for calculations
-    bc = cuda.local.array(5, dtype=uint64)
-
-    # XXX: why 25?
-    # XXX: really need to zero init bc?
-    for i in range(25):
-        bc[i] = 0
 
     # 24 rounds of permutation
     for i in range(_NUM_ROUNDS):
         # Parity calculation unrolled
-        bc[0] = state[0] ^ state[5] ^ state[10] ^ state[15] ^ state[20]
-        bc[1] = state[1] ^ state[6] ^ state[11] ^ state[16] ^ state[21]
-        bc[2] = state[2] ^ state[7] ^ state[12] ^ state[17] ^ state[22]
-        bc[3] = state[3] ^ state[8] ^ state[13] ^ state[18] ^ state[23]
-        bc[4] = state[4] ^ state[9] ^ state[14] ^ state[19] ^ state[24]
+        bc0 = state[0] ^ state[5] ^ state[10] ^ state[15] ^ state[20]
+        bc1 = state[1] ^ state[6] ^ state[11] ^ state[16] ^ state[21]
+        bc2 = state[2] ^ state[7] ^ state[12] ^ state[17] ^ state[22]
+        bc3 = state[3] ^ state[8] ^ state[13] ^ state[18] ^ state[23]
+        bc4 = state[4] ^ state[9] ^ state[14] ^ state[19] ^ state[24]
 
         # Theta unrolled
-        t0 = bc[4] ^ _rol(bc[1], 1)
-        t1 = bc[0] ^ _rol(bc[2], 1)
-        t2 = bc[1] ^ _rol(bc[3], 1)
-        t3 = bc[2] ^ _rol(bc[4], 1)
-        t4 = bc[3] ^ _rol(bc[0], 1)
+        t0 = bc4 ^ _rol(bc1, 1)
+        t1 = bc0 ^ _rol(bc2, 1)
+        t2 = bc1 ^ _rol(bc3, 1)
+        t3 = bc2 ^ _rol(bc4, 1)
+        t4 = bc3 ^ _rol(bc0, 1)
 
         state[0] ^= t0
         state[5] ^= t0
@@ -402,7 +395,7 @@ def keccak256_device(data_gpu: bytes, output_gpu: array, num_hashes=1) -> array:
     return _squeeze(state, buf, buf_idx, output_gpu, idx)
 
 
-def keccak256(data: bytes, num_hashes=1) -> bytes:
+def keccak256(data: bytes, num_hashes=1, threads_per_block=128) -> bytes:
     """
     Host-side function for the CUDA-accelerated SHA-3 implementation
 
@@ -414,7 +407,6 @@ def keccak256(data: bytes, num_hashes=1) -> bytes:
     """
 
     # Define kernel execution configuration
-    threads_per_block = 128
     blocks_per_grid = (num_hashes + threads_per_block - 1) // threads_per_block
 
     # Convert input data to a numpy array
@@ -431,7 +423,13 @@ def keccak256(data: bytes, num_hashes=1) -> bytes:
     output = output_gpu.copy_to_host()
     return output.tobytes()
 
+
 if __name__ == "__main__":
     import sys
 
-    print(keccak256(sys.argv[1].encode()).hex())
+    data_in = b""
+    hash = keccak256(data_in)
+    print(hash.hex())
+
+    expected_hash = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+    print(f"hash has expected value? {hash.hex() == expected_hash}")
