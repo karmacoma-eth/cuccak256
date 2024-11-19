@@ -349,8 +349,8 @@ def _permute(state, buf, buf_idx):
         if i + 8 <= len(buf):  # Ensure there's enough data to read
             uint64_val = uint64(0)
             for j in range(8):
-                uint64_val |= uint64(buf[i+j]) << (j * 8)
-            temp_state[i//8] = uint64_val
+                uint64_val |= uint64(buf[i + j]) << (j * 8)
+            temp_state[i // 8] = uint64_val
 
     # Manually perform bitwise XOR for each element
     for i in range(25):
@@ -368,56 +368,55 @@ def _permute(state, buf, buf_idx):
 
 
 @cuda.jit
-def keccak256_device(data_gpu: bytes, output_gpu: array, num_hashes=1) -> array:
-    idx = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
+def keccak256_device(
+    data_gpu: bytes, output_gpu: array, num_hashes: int, hashes_per_thread: int
+):
+    thread_id = cuda.grid(1)
 
-    # Ensure we don't exceed the number of hashes requested
-    if idx > num_hashes:
-        return
+    # Calculate starting index for this thread
+    start = thread_id * hashes_per_thread
+    end = min(start + hashes_per_thread, num_hashes)
 
-    buf_idx = 0
-    state = cuda.local.array(25, dtype=uint64)
-    buf = cuda.local.array(200, dtype=uint8)
+    # Each thread processes hashes from start to end
+    for idx in range(start, end):
+        buf_idx = 0
+        state = cuda.local.array(25, dtype=uint64)
+        buf = cuda.local.array(200, dtype=uint8)
 
-    # Memsset state and buf to 0
-    for i in range(25):
-        state[i] = 0
-    for i in range(200):
-        buf[i] = 0
+        # Initialize state and buffer
+        for i in range(25):
+            state[i] = 0
+        for i in range(200):
+            buf[i] = 0
 
-    # Absorb data
-    state, buf, buf_idx = _absorb(state, data_gpu, buf, buf_idx)
+        # Absorb data
+        state, buf, buf_idx = _absorb(state, data_gpu, buf, buf_idx)
 
-    # Pad in preparation for squeezing
-    state, buf, buf_idx = _pad(state, buf, buf_idx)
+        # Pad
+        state, buf, buf_idx = _pad(state, buf, buf_idx)
 
-    # Squeeze the hash
-    return _squeeze(state, buf, buf_idx, output_gpu, idx)
+        # Squeeze
+        _squeeze(state, buf, buf_idx, output_gpu, idx)
 
 
-def keccak256(data: bytes, num_hashes=1, threads_per_block=128) -> bytes:
-    """
-    Host-side function for the CUDA-accelerated SHA-3 implementation
-
-    Args:
-        data (bytes): The input data to hash.
-
-    Returns:
-        bytes: The hash of the input data.
-    """
-
-    # Define kernel execution configuration
-    blocks_per_grid = (num_hashes + threads_per_block - 1) // threads_per_block
+def keccak256(
+    data: bytes, num_hashes=1, threads_per_block=256, hashes_per_thread=256
+) -> bytes:
+    # Calculate total number of threads needed
+    total_threads = (num_hashes + hashes_per_thread - 1) // hashes_per_thread
+    blocks_per_grid = (total_threads + threads_per_block - 1) // threads_per_block
 
     # Convert input data to a numpy array
-    data = array(list(data), dtype=np_uint8)
-
-    # Allocate memory on the device
+    data = np_uint8(list(data))
     data_gpu = cuda.to_device(data)
+
+    # Allocate output buffer on the device
     output_gpu = cuda.device_array((num_hashes, BIT_LENGTH // 8), dtype=np_uint8)
 
     # Launch the kernel
-    keccak256_device[blocks_per_grid, threads_per_block](data_gpu, output_gpu, num_hashes)
+    keccak256_device[blocks_per_grid, threads_per_block](
+        data_gpu, output_gpu, num_hashes, hashes_per_thread
+    )
 
     # Copy the result back to host memory
     output = output_gpu.copy_to_host()
@@ -425,7 +424,7 @@ def keccak256(data: bytes, num_hashes=1, threads_per_block=128) -> bytes:
 
 
 if __name__ == "__main__":
-    import sys
+    import time
 
     data_in = b""
     hash = keccak256(data_in)
@@ -433,3 +432,18 @@ if __name__ == "__main__":
 
     expected_hash = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
     print(f"hash has expected value? {hash.hex() == expected_hash}")
+
+    threads_per_block = 256
+    hashes_per_thread = 256
+    num_hashes = threads_per_block * hashes_per_thread * 256
+
+    start_time = time.perf_counter()
+    keccak256(
+        b"",
+        num_hashes=num_hashes,
+        threads_per_block=threads_per_block,
+        hashes_per_thread=hashes_per_thread,
+    )
+    end_time = time.perf_counter()
+    throughput = num_hashes / (end_time - start_time)
+    print(f"{throughput:,.0f} hashes/sec ({threads_per_block=}, {hashes_per_thread=})")
