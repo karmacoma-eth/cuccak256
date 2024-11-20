@@ -2,6 +2,7 @@
 
 from numba import cuda, uint64, uint8
 from numpy import array, uint64 as np_uint64, uint8 as np_uint8
+from typing import Callable
 
 # Fixed rate for Keccak-256
 RATE = 136
@@ -265,9 +266,7 @@ def _absorb(
 
 
 @cuda.jit(device=True)
-def _squeeze(
-    state: array, buf: array, buf_idx: int, output_buf: array, output_idx: int
-):
+def _squeeze(state: array, buf: array, buf_idx: int, output_buf: array):
     """
     Performs the squeeze operation of the sponge construction
 
@@ -292,7 +291,7 @@ def _squeeze(
             byte_index = buf_idx % 8
             byte_val = (state[buf_idx // 8] >> (byte_index * 8)) & 0xFF
 
-            output_buf[output_idx, local_output_idx] = byte_val
+            output_buf[local_output_idx] = byte_val
 
             buf_idx += 1
             local_output_idx += 1
@@ -367,63 +366,91 @@ def _permute(state, buf, buf_idx):
     return state, buf, buf_idx
 
 
-@cuda.jit
-def keccak256_device(
-    data_gpu: bytes, output_gpu: array, num_hashes: int, hashes_per_thread: int
-):
+@cuda.jit(device=True)
+def keccak256_device(data_gpu: bytes, output: array):
+    buf_idx = 0
+    state = cuda.local.array(25, dtype=uint64)
+    buf = cuda.local.array(200, dtype=uint8)
+
+    # Initialize state and buffer
+    for i in range(25):
+        state[i] = 0
+    for i in range(200):
+        buf[i] = 0
+
+    # Absorb data
+    state, buf, buf_idx = _absorb(state, data_gpu, buf, buf_idx)
+
+    # Pad
+    state, buf, buf_idx = _pad(state, buf, buf_idx)
+
+    # Squeeze
+    _squeeze(state, buf, buf_idx, output)
+
+
+@cuda.jit(device=True)
+def create2_device(
+    deployer_addr: bytes,
+    initcode_hash: bytes,
+    hashes_per_thread: int,
+) -> uint32:
     thread_id = cuda.grid(1)
 
     # Calculate starting index for this thread
     start = thread_id * hashes_per_thread
-    end = min(start + hashes_per_thread, num_hashes)
+    end = start + hashes_per_thread
 
-    # Each thread processes hashes from start to end
+    output = cuda.local.array(BIT_LENGTH // 8, dtype=uint8)
+
+    # Each thread processes hashes from start to end, one salt at a time
+    best_score = 0
+    best_salt = 0
+
     for idx in range(start, end):
-        buf_idx = 0
-        state = cuda.local.array(25, dtype=uint64)
-        buf = cuda.local.array(200, dtype=uint8)
+        salt = idx.to_bytes(32, "big")
+        data = b"\xff" + deployer_addr + salt + initcode_hash
+        hash = keccak256_device(data, output)
 
-        # Initialize state and buffer
-        for i in range(25):
-            state[i] = 0
-        for i in range(200):
-            buf[i] = 0
+        score = score_func(hash)
+        if score > best_score:
+            best_score = score
+            best_salt = salt
 
-        # Absorb data
-        state, buf, buf_idx = _absorb(state, data_gpu, buf, buf_idx)
-
-        # Pad
-        state, buf, buf_idx = _pad(state, buf, buf_idx)
-
-        # Squeeze
-        _squeeze(state, buf, buf_idx, output_gpu, idx)
+    return best_salt
 
 
-def keccak256(
-    data: bytes, num_hashes=1, threads_per_block=256, hashes_per_thread=256
+@cuda.jit(device=True)
+def score_func(hash: bytes) -> int:
+    score = 0
+    for i in hash[12:]:
+        if i != 0:
+            break
+        score += 1
+
+    return score
+
+
+def create2(
+    deployer_addr: bytes,
+    initcode_hash: bytes,
+    num_hashes: int,
+    threads_per_block=256,
+    hashes_per_thread=256,
 ) -> bytes:
     # Calculate total number of threads needed
     total_threads = (num_hashes + hashes_per_thread - 1) // hashes_per_thread
     blocks_per_grid = (total_threads + threads_per_block - 1) // threads_per_block
 
-    # Convert input data to a numpy array
-    data = np_uint8(list(data))
-    data_gpu = cuda.to_device(data)
-
-    # Allocate output buffer on the device
-    output_gpu = cuda.device_array((num_hashes, BIT_LENGTH // 8), dtype=np_uint8)
-
     # Launch the kernel
-    keccak256_device[blocks_per_grid, threads_per_block](
-        data_gpu, output_gpu, num_hashes, hashes_per_thread
+    best_salt = create2_device[blocks_per_grid, threads_per_block](
+        deployer_addr, initcode_hash, hashes_per_thread
     )
 
-    # Copy the result back to host memory
-    output = output_gpu.copy_to_host()
-    return output.tobytes()
+    print(f"{best_salt=}")
+    return best_salt
 
 
-if __name__ == "__main__":
+def main():
     import time
 
     cuda.detect()
@@ -434,8 +461,12 @@ if __name__ == "__main__":
     device = cuda.current_context().device
     print(f"\tCompute Capability: {device.compute_capability}")
     print(f"\tMax Threads per Block: {device.MAX_THREADS_PER_BLOCK}")
-    print(f"\tMax Block Dimensions: {device.MAX_BLOCK_DIM_X}, {device.MAX_BLOCK_DIM_Y}, {device.MAX_BLOCK_DIM_Z}")
-    print(f"\tMax Grid Dimensions: {device.MAX_GRID_DIM_X}, {device.MAX_GRID_DIM_Y}, {device.MAX_GRID_DIM_Z}")
+    print(
+        f"\tMax Block Dimensions: {device.MAX_BLOCK_DIM_X}, {device.MAX_BLOCK_DIM_Y}, {device.MAX_BLOCK_DIM_Z}"
+    )
+    print(
+        f"\tMax Grid Dimensions: {device.MAX_GRID_DIM_X}, {device.MAX_GRID_DIM_Y}, {device.MAX_GRID_DIM_Z}"
+    )
     print(f"\tMax Shared Memory per Block: {device.MAX_SHARED_MEMORY_PER_BLOCK} bytes")
     print(f"\tMultiprocessor Count: {device.MULTIPROCESSOR_COUNT}")
     print(f"\tWarp Size: {device.WARP_SIZE}")
@@ -452,31 +483,24 @@ if __name__ == "__main__":
     print(f"\tKernel Execution Timeout: {device.KERNEL_EXEC_TIMEOUT}")
 
     print("performing self-check... ", end="")
-    expected_hash = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
-    actual_hash = keccak256(b"")
+    initcode_hash = bytes.fromhex("94d114296a5af85c1fd2dc039cdaa32f1ed4b0fe0868f02d888bfc91feb645d9")
+    deployer_addr = bytes.fromhex("48E516B34A1274f49457b9C6182097796D0498Cb")
 
-    if actual_hash.hex() == expected_hash:
-        print("✅")
-    else:
-        print("❌")
-        print(f"{expected_hash=}\n{actual_hash.hex()=}")
-        exit(1)
+    best_salt = create2(deployer_addr, initcode_hash, num_hashes=1)
+    print(f"{best_salt=}")
 
-    mp_count = device.MULTIPROCESSOR_COUNT
-    threads_per_block = 256
-    hashes_per_thread = 256
-    num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
+    # if actual_hash.hex() == expected_hash:
+    #     print("✅")
+    # else:
+    #     print("❌")
+    #     print(f"{expected_hash=}\n{actual_hash.hex()=}")
+    #     exit(1)
 
-    print("measuring throughput... ", end="")
+    # mp_count = device.MULTIPROCESSOR_COUNT
+    # threads_per_block = 256
+    # hashes_per_thread = 256
+    # num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
 
-    start_time = time.perf_counter()
-    keccak256(
-        b"",
-        num_hashes=num_hashes,
-        threads_per_block=threads_per_block,
-        hashes_per_thread=hashes_per_thread,
-    )
-    end_time = time.perf_counter()
-    elapsed = end_time - start_time
-    throughput = num_hashes / elapsed
-    print(f"{num_hashes:,.0f} hashes computed in {elapsed:.2f} seconds ({throughput:,.0f} hashes/sec) ({threads_per_block=}, {hashes_per_thread=})")
+
+if __name__ == "__main__":
+    main()
