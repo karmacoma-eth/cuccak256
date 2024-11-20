@@ -426,16 +426,42 @@ def keccak256(
 if __name__ == "__main__":
     import time
 
-    data_in = b""
-    hash = keccak256(data_in)
-    print(hash.hex())
+    print("CUDA device count:", len(cuda.gpus))
+    print("device info:")
 
+    device = cuda.current_context().device
+
+    # Add detailed device information
+    print(f"\nDevice Name: {device.name}")
+    print(f"Compute Capability: {device.compute_capability}")
+    print(f"Max Threads per Block: {device.MAX_THREADS_PER_BLOCK}")
+    print(f"Max Block Dimensions: {device.MAX_BLOCK_DIM_X}, {device.MAX_BLOCK_DIM_Y}, {device.MAX_BLOCK_DIM_Z}")
+    print(f"Max Grid Dimensions: {device.MAX_GRID_DIM_X}, {device.MAX_GRID_DIM_Y}, {device.MAX_GRID_DIM_Z}")
+    print(f"Max Shared Memory per Block: {device.MAX_SHARED_MEMORY_PER_BLOCK} bytes")
+    print(f"Multiprocessor Count: {device.MULTIPROCESSOR_COUNT}")
+    print(f"Warp Size: {device.WARP_SIZE}")
+
+
+    # print capabilities of current device
+
+
+    print("performing self-check... ", end="")
     expected_hash = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
-    print(f"hash has expected value? {hash.hex() == expected_hash}")
+    actual_hash = keccak256(b"")
 
+    if actual_hash.hex() == expected_hash:
+        print("✅")
+    else:
+        print("❌")
+        print(f"{expected_hash=}\n{actual_hash.hex()=}")
+        exit(1)
+
+    mp_count = device.MULTIPROCESSOR_COUNT
     threads_per_block = 256
     hashes_per_thread = 256
-    num_hashes = threads_per_block * hashes_per_thread * 256
+    num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
+
+    print("measuring throughput... ", end="")
 
     start_time = time.perf_counter()
     keccak256(
@@ -445,5 +471,6 @@ if __name__ == "__main__":
         hashes_per_thread=hashes_per_thread,
     )
     end_time = time.perf_counter()
-    throughput = num_hashes / (end_time - start_time)
-    print(f"{throughput:,.0f} hashes/sec ({threads_per_block=}, {hashes_per_thread=})")
+    elapsed = end_time - start_time
+    throughput = num_hashes / elapsed
+    print(f"{num_hashes:,.0f} hashes computed in {elapsed:.2f} seconds ({throughput:,.0f} hashes/sec) ({threads_per_block=}, {hashes_per_thread=})")
