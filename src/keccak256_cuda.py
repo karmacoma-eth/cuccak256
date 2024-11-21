@@ -265,9 +265,7 @@ def _absorb(
 
 
 @cuda.jit(device=True)
-def _squeeze(
-    state: array, buf: array, buf_idx: int, output_buf: array, output_idx: int
-):
+def _squeeze(state: array, buf: array, buf_idx: int, output_ptr: array):
     """
     Performs the squeeze operation of the sponge construction
 
@@ -275,8 +273,7 @@ def _squeeze(
         state (device array): The state array of the SHA-3 sponge construction
         buf (device array): The buffer to squeeze the output into
         buf_idx (int): Current index in the buffer
-        output_buf (device array): The output buffer to write the hash to
-        output_idx (int): The index in the output buffer to write to
+        output_ptr (device array): Pointer to where the hash output should be written
     """
 
     tosqueeze = BIT_LENGTH // 8
@@ -292,7 +289,7 @@ def _squeeze(
             byte_index = buf_idx % 8
             byte_val = (state[buf_idx // 8] >> (byte_index * 8)) & 0xFF
 
-            output_buf[output_idx, local_output_idx] = byte_val
+            output_ptr[local_output_idx] = byte_val
 
             buf_idx += 1
             local_output_idx += 1
@@ -367,6 +364,35 @@ def _permute(state, buf, buf_idx):
     return state, buf, buf_idx
 
 
+@cuda.jit(device=True)
+def keccak256_single(data: bytes, output_ptr: array):
+    """Computes a single Keccak256 hash on the device
+
+    Args:
+        data (bytes): Input data to hash
+        output_buf (array): Buffer to write the hash result to
+        output_idx (int): Index in output buffer to write the result
+    """
+    buf_idx = 0
+    state = cuda.local.array(25, dtype=uint64)
+    buf = cuda.local.array(200, dtype=uint8)
+
+    # Initialize state and buffer
+    for i in range(25):
+        state[i] = 0
+    for i in range(200):
+        buf[i] = 0
+
+    # Absorb data
+    state, buf, buf_idx = _absorb(state, data, buf, buf_idx)
+
+    # Pad
+    state, buf, buf_idx = _pad(state, buf, buf_idx)
+
+    # Squeeze
+    _squeeze(state, buf, buf_idx, output_ptr)
+
+
 @cuda.jit
 def keccak256_device(
     data_gpu: bytes, output_gpu: array, num_hashes: int, hashes_per_thread: int
@@ -379,24 +405,7 @@ def keccak256_device(
 
     # Each thread processes hashes from start to end
     for idx in range(start, end):
-        buf_idx = 0
-        state = cuda.local.array(25, dtype=uint64)
-        buf = cuda.local.array(200, dtype=uint8)
-
-        # Initialize state and buffer
-        for i in range(25):
-            state[i] = 0
-        for i in range(200):
-            buf[i] = 0
-
-        # Absorb data
-        state, buf, buf_idx = _absorb(state, data_gpu, buf, buf_idx)
-
-        # Pad
-        state, buf, buf_idx = _pad(state, buf, buf_idx)
-
-        # Squeeze
-        _squeeze(state, buf, buf_idx, output_gpu, idx)
+        keccak256_single(data_gpu, output_gpu[idx])
 
 
 def keccak256(
@@ -425,8 +434,12 @@ def keccak256(
 
 def check_expected_hash(data: bytes, expected_hash: bytes):
     print(f"checking that keccak256({data.hex()}) == {expected_hash.hex()}", end="")
-    hash = keccak256(data)
-    print(f" {'✅' if hash.hex() == expected_hash.hex() else '❌'}")
+    hash = keccak256(data, num_hashes=1)
+    if hash.hex() == expected_hash.hex():
+        print(" ✅")
+    else:
+        print(" ❌")
+        print(f"  {hash.hex()=}")
 
 
 if __name__ == "__main__":
