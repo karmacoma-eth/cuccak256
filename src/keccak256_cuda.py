@@ -439,6 +439,7 @@ if __name__ == "__main__":
     check_expected_hash(ff_byte + zero_byte * 84, bytes.fromhex("6d0594910e7cec465755319cffc4f52f884a02bcd5716744cd622127366f2edf"))
     check_expected_hash(ff_byte + zero_byte * 52 + empty_hash, bytes.fromhex("df190018ed932c8aba3da0d7e33c0c7f7df4809055c3eba6c09cfe4baf1bd9e0"))
 
+    mp_count = cuda.current_context().device.MULTIPROCESSOR_COUNT
     threads_per_block = 256
     hashes_per_thread = 256
     num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
