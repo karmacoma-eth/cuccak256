@@ -423,46 +423,22 @@ def keccak256(
     return output.tobytes()
 
 
+def check_expected_hash(data: bytes, expected_hash: bytes):
+    print(f"checking that keccak256({data.hex()}) == {expected_hash.hex()}", end="")
+    hash = keccak256(data)
+    print(f" {'✅' if hash.hex() == expected_hash.hex() else '❌'}")
+
+
 if __name__ == "__main__":
     import time
 
-    cuda.detect()
+    empty_hash = bytes.fromhex("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
+    zero_byte = b'\x00'
+    ff_byte = b'\xff'
+    check_expected_hash(b"", empty_hash)
+    check_expected_hash(ff_byte + zero_byte * 84, bytes.fromhex("6d0594910e7cec465755319cffc4f52f884a02bcd5716744cd622127366f2edf"))
+    check_expected_hash(ff_byte + zero_byte * 52 + empty_hash, bytes.fromhex("df190018ed932c8aba3da0d7e33c0c7f7df4809055c3eba6c09cfe4baf1bd9e0"))
 
-    print()
-    print("device info:")
-
-    device = cuda.current_context().device
-    print(f"\tCompute Capability: {device.compute_capability}")
-    print(f"\tMax Threads per Block: {device.MAX_THREADS_PER_BLOCK}")
-    print(f"\tMax Block Dimensions: {device.MAX_BLOCK_DIM_X}, {device.MAX_BLOCK_DIM_Y}, {device.MAX_BLOCK_DIM_Z}")
-    print(f"\tMax Grid Dimensions: {device.MAX_GRID_DIM_X}, {device.MAX_GRID_DIM_Y}, {device.MAX_GRID_DIM_Z}")
-    print(f"\tMax Shared Memory per Block: {device.MAX_SHARED_MEMORY_PER_BLOCK} bytes")
-    print(f"\tMultiprocessor Count: {device.MULTIPROCESSOR_COUNT}")
-    print(f"\tWarp Size: {device.WARP_SIZE}")
-    print(f"\tTotal Constant Memory: {device.TOTAL_CONSTANT_MEMORY} bytes")
-    print(f"\tMax Registers per Block: {device.MAX_REGISTERS_PER_BLOCK}")
-    print(f"\tClock Rate: {device.CLOCK_RATE / 1e3} MHz")
-    print(f"\tMemory Clock Rate: {device.MEMORY_CLOCK_RATE / 1e3} MHz")
-    print(f"\tL2 Cache Size: {device.L2_CACHE_SIZE} bytes")
-    print(f"\tAsynchronous Engines: {device.ASYNC_ENGINE_COUNT}")
-    print(f"\tCompute Mode: {device.COMPUTE_MODE}")
-    print(f"\tConcurrent Kernels Support: {device.CONCURRENT_KERNELS}")
-    print(f"\tDevice Overlap: {device.UNIFIED_ADDRESSING}")
-    print(f"\tECC Enabled: {device.ECC_ENABLED}")
-    print(f"\tKernel Execution Timeout: {device.KERNEL_EXEC_TIMEOUT}")
-
-    print("performing self-check... ", end="")
-    expected_hash = "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
-    actual_hash = keccak256(b"")
-
-    if actual_hash.hex() == expected_hash:
-        print("✅")
-    else:
-        print("❌")
-        print(f"{expected_hash=}\n{actual_hash.hex()=}")
-        exit(1)
-
-    mp_count = device.MULTIPROCESSOR_COUNT
     threads_per_block = 256
     hashes_per_thread = 256
     num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
