@@ -1,5 +1,6 @@
 """SHA3 implementation in Python in functional style"""
 
+import os
 import numpy as np
 from numba import cuda, uint8, uint64
 
@@ -422,49 +423,39 @@ def create2_kernel(deployer_addr, salt, initcode_hash, output):
 # can be called only from host code
 @cuda.jit
 def create2_search_kernel(
-    deployer_addr,
-    initcode_hash,
-    hashes_per_thread,
-    global_best_scores,
-    global_best_salts,
+    input_template: np.ndarray, # 85-byte template
+    hashes_per_thread: int,
+    global_best_scores: np.ndarray, # array of shape=(blocks_per_grid, type=np.int32)
+    global_best_salts: np.ndarray, # array of shape=(blocks_per_grid, type=np.int32)
 ):
-    # Shared memory allocation
-    tx = cuda.threadIdx.x
-    bx = cuda.blockIdx.x
-    bd = cuda.blockDim.x
+    # index in the block, e.g. between 0 and 255
+    thread_index = cuda.threadIdx.x
+    threads_per_block = cuda.blockDim.x
 
-    # Maximum threads per block (adjust as needed)
-    max_threads_per_block = 256
-
-    smem_best_scores = cuda.shared.array(shape=max_threads_per_block, dtype=np.int32)
-    smem_best_salts = cuda.shared.array(shape=(max_threads_per_block, 32), dtype=uint8)
+    # allocate shared memory once per block
+    smem_best_scores = cuda.shared.array(shape=(256,), dtype=np.int32)
+    smem_best_salts = cuda.shared.array(shape=(256,), dtype=np.int32)
 
     thread_best_score = np.int32(0)
-    thread_best_salt = cuda.local.array(32, dtype=np.uint8)
+    thread_best_salt = np.int32(-1)
 
-    thread_id = cuda.grid(1)
-    start = thread_id * hashes_per_thread
-    end = start + hashes_per_thread
-
-    # Constants
-    data_len = 1 + 20 + 32 + 32
-    data = cuda.local.array(data_len, dtype=uint8)
-    data[0] = 0xFF
-    for i in range(20):
-        data[1 + i] = deployer_addr[i]
-    for i in range(32):
-        data[21 + i] = 0
-    for i in range(32):
-        data[53 + i] = initcode_hash[i]
+    # copy the template from global to local memory
+    data = cuda.local.array(85, dtype=uint8)
+    for i in range(85):
+        data[i] = input_template[i]
 
     hash_output = cuda.local.array(32, dtype=uint8)
 
-    # Each thread processes its assigned salts
+    # global thread id, between 0 and total_number_of_threads
+    thread_id = cuda.grid(1)
+    start = thread_id * hashes_per_thread
+    end = start + hashes_per_thread
     for idx in range(start, end):
-        # write idx at the last 4 bytes of salt
-        data[49] = idx & 0xFF000000
-        data[50] = idx & 0xFF0000
-        data[51] = idx & 0xFF00
+        # fill in the template:
+        # write idx in big endian at the last 4 bytes of salt
+        data[49] = (idx >> 24) & 0xFF
+        data[50] = (idx >> 16) & 0xFF
+        data[51] = (idx >> 8) & 0xFF
         data[52] = idx & 0xFF
 
         # Compute hash
@@ -473,34 +464,40 @@ def create2_search_kernel(
         # Score the hash
         score = score_func(hash_output)
         if score > thread_best_score and score > 1:
-            print("new best score = ", score)
-            print("new best salt = ", idx)
             thread_best_score = score
-            for i in range(32):
-                thread_best_salt[i] = data[21 + i]
+            thread_best_salt = idx
 
-    # Write per-thread best score and salt to shared memory
-    smem_best_scores[tx] = thread_best_score
-    for i in range(32):
-        smem_best_salts[tx, i] = thread_best_salt[i]
+    # Write per-thread best score and salt to block-level shared memory
+    smem_best_scores[thread_index] = thread_best_score
+    smem_best_salts[thread_index] = thread_best_salt
     cuda.syncthreads()
 
     # Reduction within block to find the best score and salt
-    stride = bd // 2
+    stride = threads_per_block // 2
     while stride > 0:
-        if tx < stride:
-            if smem_best_scores[tx + stride] > smem_best_scores[tx]:
-                smem_best_scores[tx] = smem_best_scores[tx + stride]
-                for i in range(32):
-                    smem_best_salts[tx, i] = smem_best_salts[tx + stride, i]
+        if thread_index < stride:
+            smem_best_scores[thread_index] = max(smem_best_scores[thread_index], smem_best_scores[thread_index + stride])
+            smem_best_salts[thread_index] = max(smem_best_salts[thread_index], smem_best_salts[thread_index + stride])
         cuda.syncthreads()
         stride //= 2
 
     # Write block's best score and salt to global memory
-    if tx == 0:
-        global_best_scores[bx] = smem_best_scores[0]
-        for i in range(32):
-            global_best_salts[bx, i] = smem_best_salts[0, i]
+    block_index = cuda.blockIdx.x
+    if thread_index == 0:
+        global_best_scores[block_index] = smem_best_scores[0]
+        global_best_salts[block_index] = smem_best_salts[0]
+
+
+def get_salt_prefix() -> bytes:
+    prefix = bytes.fromhex(os.environ.get("SALT_PREFIX", "00" * 28))
+    if len(prefix) > 28:
+        raise ValueError("SALT_PREFIX must be 28 bytes or less")
+    if len(prefix) < 28:
+        # pad right
+        print(f"padding SALT_PREFIX={prefix.hex()} with {28 - len(prefix)} bytes of \\x00")
+        prefix = prefix + b"\x00" * (28 - len(prefix))
+
+    return prefix
 
 
 # host function
@@ -515,40 +512,42 @@ def create2_search(
     total_threads = (num_hashes + hashes_per_thread - 1) // hashes_per_thread
     blocks_per_grid = (total_threads + threads_per_block - 1) // threads_per_block
 
-    # Prepare inputs
-    deployer_addr_np = np.frombuffer(deployer_addr, dtype=np.uint8)
-    initcode_hash_np = np.frombuffer(initcode_hash, dtype=np.uint8)
+    print(f"running with {blocks_per_grid} blocks and {threads_per_block} threads on {cuda.current_context().device.MULTIPROCESSOR_COUNT} multiprocessors")
+
+    # Prepare input
+    salt_prefix = get_salt_prefix()
+    input_template = b"\xFF" + deployer_addr + salt_prefix + b"\x00" * 4 + initcode_hash
+    assert len(input_template) == 85
+    input_template_h = np.frombuffer(input_template, dtype=np.uint8)
 
     # Copy data to device
-    deployer_addr_d = cuda.to_device(deployer_addr_np)
-    initcode_hash_d = cuda.to_device(initcode_hash_np)
+    input_template_d = cuda.to_device(input_template_h)
 
     # Allocate output arrays
-    global_best_scores = cuda.device_array(shape=(blocks_per_grid,), dtype=np.int32)
-    global_best_salts = cuda.device_array(shape=(blocks_per_grid, 32), dtype=np.uint8)
+    best_scores_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.int32)
+    best_salts_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.int32)
 
     # Launch the kernel
     create2_search_kernel[blocks_per_grid, threads_per_block](
-        deployer_addr_d,
-        initcode_hash_d,
+        input_template_d,
         hashes_per_thread,
-        global_best_scores,
-        global_best_salts,
+        best_scores_d,
+        best_salts_d,
     )
 
     # Copy back the per-block best scores and salts
-    host_best_scores = global_best_scores.copy_to_host()
-    host_best_salts = global_best_salts.copy_to_host()
+    best_scores_h = best_scores_d.copy_to_host()
+    best_salts_h = best_salts_d.copy_to_host()
 
     # Find the overall best
     best_score = -1
     best_salt = None
     for i in range(blocks_per_grid):
-        if host_best_scores[i] > best_score:
-            best_score = host_best_scores[i]
-            best_salt = host_best_salts[i]
+        if best_scores_h[i] > best_score:
+            best_score = best_scores_h[i]
+            best_salt = best_salts_h[i]
 
-    return bytes(best_salt)
+    return salt_prefix + int(best_salt).to_bytes(4, "big")
 
 
 def create2_helper(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> bytes:
