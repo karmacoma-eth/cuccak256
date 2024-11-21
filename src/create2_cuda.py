@@ -487,12 +487,10 @@ def create2_search_kernel(
     stride = threads_per_block // 2
     while stride > 0:
         if thread_index < stride:
-            smem_best_scores[thread_index] = max(
-                smem_best_scores[thread_index], smem_best_scores[thread_index + stride]
-            )
-            smem_best_salts[thread_index] = max(
-                smem_best_salts[thread_index], smem_best_salts[thread_index + stride]
-            )
+            far_index = thread_index + stride
+            if smem_best_scores[far_index] > smem_best_scores[thread_index]:
+                smem_best_scores[thread_index] = smem_best_scores[far_index]
+                smem_best_salts[thread_index] = smem_best_salts[far_index]
         cuda.syncthreads()
         stride //= 2
 
@@ -525,7 +523,7 @@ def create2_search(
     assert len(input_template) == 85
 
     # Copy data to device
-    input_template_d = to_device_array(input_template, dtype=np.uint8)
+    input_template_d = to_device_array(input_template)
 
     # Allocate output arrays
     best_scores_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.int32)

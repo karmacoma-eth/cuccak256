@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 
 from numba import cuda
@@ -102,9 +103,13 @@ def main():
     best_score = 0
     absolute_start_time = time.perf_counter()
 
-    deployer_addr = get_deployer_addr()
-    initcode_hash = get_initcode_hash()
-    salt_prefix = get_salt_prefix()
+    try:
+        deployer_addr = get_deployer_addr()
+        initcode_hash = get_initcode_hash()
+        salt_prefix = get_salt_prefix()
+    except ValueError as e:
+        print(f"error: {e}")
+        sys.exit(1)
 
     try:
         while True:
