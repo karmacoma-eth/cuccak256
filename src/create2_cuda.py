@@ -424,10 +424,10 @@ def create2_kernel(deployer_addr, salt, initcode_hash, output):
 # can be called only from host code
 @cuda.jit
 def create2_search_kernel(
-    input_template: np.ndarray, # 85-byte template
+    input_template: np.ndarray,  # 85-byte template
     hashes_per_thread: int,
-    global_best_scores: np.ndarray, # array of shape=(blocks_per_grid, type=np.int32)
-    global_best_salts: np.ndarray, # array of shape=(blocks_per_grid, type=np.uint64)
+    global_best_scores: np.ndarray,  # array of shape=(blocks_per_grid, type=np.int32)
+    global_best_salts: np.ndarray,  # array of shape=(blocks_per_grid, type=np.uint64)
 ):
     block_index = cuda.blockIdx.x
     thread_index = cuda.threadIdx.x  # index in the block, e.g. between 0 and 255
@@ -472,7 +472,11 @@ def create2_search_kernel(
         score = score_func(hash_output)
         if score > thread_best_score and score > 1:
             thread_best_score = score
-            thread_best_salt = (np.uint64(block_index) << 48) | (np.uint64(thread_index) << 32) | np.uint64(idx)
+            thread_best_salt = (
+                (np.uint64(block_index) << 48)
+                | (np.uint64(thread_index) << 32)
+                | np.uint64(idx)
+            )
 
     # Write per-thread best score and salt to block-level shared memory
     smem_best_scores[thread_index] = thread_best_score
@@ -483,8 +487,12 @@ def create2_search_kernel(
     stride = threads_per_block // 2
     while stride > 0:
         if thread_index < stride:
-            smem_best_scores[thread_index] = max(smem_best_scores[thread_index], smem_best_scores[thread_index + stride])
-            smem_best_salts[thread_index] = max(smem_best_salts[thread_index], smem_best_salts[thread_index + stride])
+            smem_best_scores[thread_index] = max(
+                smem_best_scores[thread_index], smem_best_scores[thread_index + stride]
+            )
+            smem_best_salts[thread_index] = max(
+                smem_best_salts[thread_index], smem_best_salts[thread_index + stride]
+            )
         cuda.syncthreads()
         stride //= 2
 
@@ -494,23 +502,12 @@ def create2_search_kernel(
         global_best_salts[block_index] = smem_best_salts[0]
 
 
-def get_salt_prefix() -> bytes:
-    prefix = bytes.fromhex(os.environ.get("SALT_PREFIX", "00" * 20))
-    if len(prefix) > 20:
-        raise ValueError("SALT_PREFIX must be 20 bytes or less")
-    if len(prefix) < 20:
-        # pad right
-        print(f"padding SALT_PREFIX={prefix.hex()} with {20 - len(prefix)} bytes of \\x00")
-        prefix = prefix + b"\x00" * (20 - len(prefix))
-
-    return prefix
-
-
 # host function
 def create2_search(
     deployer_addr: bytes,
     initcode_hash: bytes,
-    num_hashes: int,
+    salt_prefix: bytes = b"\x00" * 20,
+    num_hashes: int = 2**20,
     threads_per_block=256,
     hashes_per_thread=256,
 ) -> tuple[int, bytes]:
@@ -519,15 +516,16 @@ def create2_search(
     blocks_per_grid = (total_threads + threads_per_block - 1) // threads_per_block
 
     # Prepare input
-    salt_prefix = get_salt_prefix()
     assert len(salt_prefix) == 20
     run_id = int(time.time()).to_bytes(4, "big")
 
-    input_template = b"\xFF" + deployer_addr + salt_prefix + run_id + b"\x00" * 8 + initcode_hash
+    input_template = (
+        b"\xff" + deployer_addr + salt_prefix + run_id + b"\x00" * 8 + initcode_hash
+    )
     assert len(input_template) == 85
 
     # Copy data to device
-    input_template_d = cuda.to_device(np.frombuffer(input_template, dtype=np.uint8))
+    input_template_d = to_device_array(input_template, dtype=np.uint8)
 
     # Allocate output arrays
     best_scores_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.int32)
@@ -571,30 +569,6 @@ def create2_helper(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> b
     create2_kernel[1, 1](deployer_addr_d, salt_d, initcode_hash_d, hash_output_d)
     hash_output_h = hash_output_d.copy_to_host()
     return bytes(hash_output_h)[12:]
-
-
-def print_device_info():
-    cuda.detect()
-
-    print("\ndevice info:")
-
-    device = cuda.current_context().device
-    print(f"\tCompute Capability: {device.compute_capability}")
-    print(f"\tMax Threads per Block: {device.MAX_THREADS_PER_BLOCK}")
-    print(f"\tMax Shared Memory per Block: {device.MAX_SHARED_MEMORY_PER_BLOCK} bytes")
-    print(f"\tMultiprocessor Count: {device.MULTIPROCESSOR_COUNT}")
-    print(f"\tWarp Size: {device.WARP_SIZE}")
-    print(f"\tTotal Constant Memory: {device.TOTAL_CONSTANT_MEMORY} bytes")
-    print(f"\tMax Registers per Block: {device.MAX_REGISTERS_PER_BLOCK}")
-    print(f"\tClock Rate: {device.CLOCK_RATE / 1e3} MHz")
-    print(f"\tMemory Clock Rate: {device.MEMORY_CLOCK_RATE / 1e3} MHz")
-    print(f"\tL2 Cache Size: {device.L2_CACHE_SIZE} bytes")
-    print(f"\tAsynchronous Engines: {device.ASYNC_ENGINE_COUNT}")
-    print(f"\tCompute Mode: {device.COMPUTE_MODE}")
-    print(f"\tConcurrent Kernels Support: {device.CONCURRENT_KERNELS}")
-    print(f"\tDevice Overlap: {device.UNIFIED_ADDRESSING}")
-    print(f"\tECC Enabled: {device.ECC_ENABLED}")
-    print(f"\tKernel Execution Timeout: {device.KERNEL_EXEC_TIMEOUT}")
 
 
 def to_device_array(data: bytes) -> np.ndarray:
@@ -646,33 +620,25 @@ def main():
     )
 
     print("measuring throughput... ")
+
     mp_count = cuda.current_context().device.MULTIPROCESSOR_COUNT
     threads_per_block = 256
-
-    hashes_per_thread = 2**14
+    hashes_per_thread = 256
     num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
 
-    best_score = 0
-    best_salt = None
+    for hashes_per_thread in [2**i for i in range(10, 20)]:
+        start_time = time.perf_counter()
+        best_score, best_salt = create2_search(
+            zero_addr,
+            empty_hash,
+            num_hashes=num_hashes,
+            threads_per_block=threads_per_block,
+            hashes_per_thread=hashes_per_thread,
+        )
+        end_time = time.perf_counter()
+        throughput = num_hashes / (end_time - start_time)
+        print(f"{throughput:,.0f} salts/sec with {hashes_per_thread} hashes/thread")
 
-    try:
-        while True:
-            start_time = time.perf_counter()
-            score, salt = create2_search(
-                zero_addr, empty_hash, num_hashes, threads_per_block, hashes_per_thread
-            )
-            end_time = time.perf_counter()
-            elapsed = end_time - start_time
-            throughput = num_hashes / elapsed
-            print(f"{num_hashes:,.0f} hashes computed in {elapsed:.2f} seconds ({throughput:,.0f} hashes/sec)")
-
-            if score > best_score:
-                best_score = score
-                best_salt = salt
-                address = create2_helper(zero_addr, best_salt, empty_hash)
-                print(f"🏆 new best score: {best_score}, address 0x{address.hex()} (produced with salt {best_salt.hex()})")
-    except KeyboardInterrupt:
-        pass
 
 if __name__ == "__main__":
     main()
