@@ -2,6 +2,7 @@
 
 import os
 import numpy as np
+import time
 from numba import cuda, uint8, uint64
 
 # Fixed rate for Keccak-256
@@ -426,31 +427,37 @@ def create2_search_kernel(
     input_template: np.ndarray, # 85-byte template
     hashes_per_thread: int,
     global_best_scores: np.ndarray, # array of shape=(blocks_per_grid, type=np.int32)
-    global_best_salts: np.ndarray, # array of shape=(blocks_per_grid, type=np.int32)
+    global_best_salts: np.ndarray, # array of shape=(blocks_per_grid, type=np.uint64)
 ):
-    # index in the block, e.g. between 0 and 255
-    thread_index = cuda.threadIdx.x
+    block_index = cuda.blockIdx.x
+    thread_index = cuda.threadIdx.x  # index in the block, e.g. between 0 and 255
     threads_per_block = cuda.blockDim.x
 
     # allocate shared memory once per block
     smem_best_scores = cuda.shared.array(shape=(256,), dtype=np.int32)
-    smem_best_salts = cuda.shared.array(shape=(256,), dtype=np.int32)
+    smem_best_salts = cuda.shared.array(shape=(256,), dtype=np.uint64)
 
     thread_best_score = np.int32(0)
-    thread_best_salt = np.int32(-1)
+    thread_best_salt = np.uint64(0)
 
     # copy the template from global to local memory
     data = cuda.local.array(85, dtype=uint8)
     for i in range(85):
         data[i] = input_template[i]
 
+    # write block index as a 2-byte big endian integer
+    data[45] = (block_index >> 8) & 0xFF
+    data[46] = block_index & 0xFF
+
+    # write thread index as a 2-byte big endian integer
+    data[47] = (thread_index >> 8) & 0xFF
+    data[48] = thread_index & 0xFF
+
+    # allocate local array to store the hash output
     hash_output = cuda.local.array(32, dtype=uint8)
 
     # global thread id, between 0 and total_number_of_threads
-    thread_id = cuda.grid(1)
-    start = thread_id * hashes_per_thread
-    end = start + hashes_per_thread
-    for idx in range(start, end):
+    for idx in range(hashes_per_thread):
         # fill in the template:
         # write idx in big endian at the last 4 bytes of salt
         data[49] = (idx >> 24) & 0xFF
@@ -465,7 +472,7 @@ def create2_search_kernel(
         score = score_func(hash_output)
         if score > thread_best_score and score > 1:
             thread_best_score = score
-            thread_best_salt = idx
+            thread_best_salt = (np.uint64(block_index) << 48) | (np.uint64(thread_index) << 32) | np.uint64(idx)
 
     # Write per-thread best score and salt to block-level shared memory
     smem_best_scores[thread_index] = thread_best_score
@@ -482,20 +489,19 @@ def create2_search_kernel(
         stride //= 2
 
     # Write block's best score and salt to global memory
-    block_index = cuda.blockIdx.x
     if thread_index == 0:
         global_best_scores[block_index] = smem_best_scores[0]
         global_best_salts[block_index] = smem_best_salts[0]
 
 
 def get_salt_prefix() -> bytes:
-    prefix = bytes.fromhex(os.environ.get("SALT_PREFIX", "00" * 28))
-    if len(prefix) > 28:
-        raise ValueError("SALT_PREFIX must be 28 bytes or less")
-    if len(prefix) < 28:
+    prefix = bytes.fromhex(os.environ.get("SALT_PREFIX", "00" * 20))
+    if len(prefix) > 20:
+        raise ValueError("SALT_PREFIX must be 20 bytes or less")
+    if len(prefix) < 20:
         # pad right
-        print(f"padding SALT_PREFIX={prefix.hex()} with {28 - len(prefix)} bytes of \\x00")
-        prefix = prefix + b"\x00" * (28 - len(prefix))
+        print(f"padding SALT_PREFIX={prefix.hex()} with {20 - len(prefix)} bytes of \\x00")
+        prefix = prefix + b"\x00" * (20 - len(prefix))
 
     return prefix
 
@@ -507,25 +513,25 @@ def create2_search(
     num_hashes: int,
     threads_per_block=256,
     hashes_per_thread=256,
-) -> bytes:
+) -> tuple[int, bytes]:
     # Calculate total number of threads and blocks
     total_threads = (num_hashes + hashes_per_thread - 1) // hashes_per_thread
     blocks_per_grid = (total_threads + threads_per_block - 1) // threads_per_block
 
-    print(f"running with {blocks_per_grid} blocks and {threads_per_block} threads on {cuda.current_context().device.MULTIPROCESSOR_COUNT} multiprocessors")
-
     # Prepare input
     salt_prefix = get_salt_prefix()
-    input_template = b"\xFF" + deployer_addr + salt_prefix + b"\x00" * 4 + initcode_hash
+    assert len(salt_prefix) == 20
+    run_id = int(time.time()).to_bytes(4, "big")
+
+    input_template = b"\xFF" + deployer_addr + salt_prefix + run_id + b"\x00" * 8 + initcode_hash
     assert len(input_template) == 85
-    input_template_h = np.frombuffer(input_template, dtype=np.uint8)
 
     # Copy data to device
-    input_template_d = cuda.to_device(input_template_h)
+    input_template_d = cuda.to_device(np.frombuffer(input_template, dtype=np.uint8))
 
     # Allocate output arrays
     best_scores_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.int32)
-    best_salts_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.int32)
+    best_salts_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.uint64)
 
     # Launch the kernel
     create2_search_kernel[blocks_per_grid, threads_per_block](
@@ -547,7 +553,9 @@ def create2_search(
             best_score = best_scores_h[i]
             best_salt = best_salts_h[i]
 
-    return salt_prefix + int(best_salt).to_bytes(4, "big")
+    full_salt = salt_prefix + run_id + int(best_salt).to_bytes(8, "big")
+    assert len(full_salt) == 32
+    return best_score, full_salt
 
 
 def create2_helper(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> bytes:
@@ -619,8 +627,6 @@ def check_expected_addr(
 
 
 def main():
-    import time
-
     zero_addr = b"\x00" * 20
     zero_bytes32 = b"\x00" * 32
     empty_hash = bytes.fromhex(
@@ -639,23 +645,34 @@ def main():
         bytes.fromhex("E33C0C7F7df4809055C3ebA6c09CFe4BaF1BD9e0"),
     )
 
+    print("measuring throughput... ")
     mp_count = cuda.current_context().device.MULTIPROCESSOR_COUNT
     threads_per_block = 256
-    hashes_per_thread = 256
+
+    hashes_per_thread = 2**14
     num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
 
-    print("measuring throughput... ", end="")
-    start_time = time.perf_counter()
-    best_salt = create2_search(
-        zero_addr, empty_hash, num_hashes, threads_per_block, hashes_per_thread
-    )
-    end_time = time.perf_counter()
-    throughput = num_hashes / (end_time - start_time)
-    print(f"{throughput:,.0f} salts/sec")
+    best_score = 0
+    best_salt = None
 
-    print(f"best salt: {best_salt.hex()}")
-    print(f"{create2_helper(zero_addr, best_salt, empty_hash).hex()=}")
+    try:
+        while True:
+            start_time = time.perf_counter()
+            score, salt = create2_search(
+                zero_addr, empty_hash, num_hashes, threads_per_block, hashes_per_thread
+            )
+            end_time = time.perf_counter()
+            elapsed = end_time - start_time
+            throughput = num_hashes / elapsed
+            print(f"{num_hashes:,.0f} hashes computed in {elapsed:.2f} seconds ({throughput:,.0f} hashes/sec)")
 
+            if score > best_score:
+                best_score = score
+                best_salt = salt
+                address = create2_helper(zero_addr, best_salt, empty_hash)
+                print(f"🏆 new best score: {best_score}, address 0x{address.hex()} (produced with salt {best_salt.hex()})")
+    except KeyboardInterrupt:
+        pass
 
 if __name__ == "__main__":
     main()
