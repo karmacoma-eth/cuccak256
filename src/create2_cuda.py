@@ -368,7 +368,17 @@ def _permute(state, buf, buf_idx):
 
 
 @cuda.jit(device=True)
-def keccak256_single(data: bytes, output_ptr: np.ndarray):
+def keccak256_single_wrapped(data: bytes, output_ptr: np.ndarray):
+    state = cuda.local.array(25, dtype=uint64)
+    buf = cuda.local.array(200, dtype=uint8)
+    keccak256_single(data, output_ptr, state, buf)
+
+
+@cuda.jit(device=True)
+def keccak256_single(data: bytes, # input, 85xu8
+                     output_ptr: np.ndarray, # output, 32xu8
+                     state: np.ndarray, # local, 25xu64
+                     buf: np.ndarray): # local, 200xu8
     """Computes a single Keccak256 hash on the device
 
     Args:
@@ -377,8 +387,6 @@ def keccak256_single(data: bytes, output_ptr: np.ndarray):
         output_idx (int): Index in output buffer to write the result
     """
     buf_idx = 0
-    state = cuda.local.array(25, dtype=uint64)
-    buf = cuda.local.array(200, dtype=uint8)
 
     # Initialize state and buffer
     for i in range(25):
@@ -508,7 +516,7 @@ def create2_kernel(deployer_addr, salt, initcode_hash, output):
     for i in range(32):
         data[53 + i] = initcode_hash[i]
 
-    keccak256_single(data, output)
+    keccak256_single_wrapped(data, output)
 
 
 # can be called only from host code
@@ -546,6 +554,10 @@ def create2_search_kernel(
     # allocate local array to store the hash output
     hash_output = cuda.local.array(32, dtype=uint8)
 
+    # allocate local arrays to store the state and buffer out of the main loop
+    state = cuda.local.array(25, dtype=uint64)
+    buf = cuda.local.array(200, dtype=uint8)
+
     # global thread id, between 0 and total_number_of_threads
     for idx in range(hashes_per_thread):
         # fill in the template:
@@ -556,7 +568,7 @@ def create2_search_kernel(
         data[52] = idx & 0xFF
 
         # Compute hash
-        keccak256_single(data, hash_output)
+        keccak256_single(data, hash_output, state, buf)
 
         # Score the hash
         score = score_func_uniswap_v4(hash_output)
