@@ -236,14 +236,18 @@ def _absorb(state: np.ndarray, data: bytes, buf: np.ndarray, buf_idx: int) -> in
     i = 0
     while todo > 0:
         cando = 136 - buf_idx
-        willabsorb = min(cando, todo)
+        willabsorb = cando if cando < todo else todo
+
         for j in range(willabsorb):
             # Directly manipulate each byte rather than using numpy operations
             buf[buf_idx + j] ^= data[i + j]
+
         buf_idx += willabsorb
+
         if buf_idx == 136:
             # Ensure _permute is also device-friendly
             buf_idx = _permute(state, buf)
+
         todo -= willabsorb
         i += willabsorb
 
@@ -268,7 +272,7 @@ def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.nd
     # Squeeze output
     while tosqueeze > 0:
         cansqueeze = 136 - buf_idx  # RATE - buf_idx
-        willsqueeze = min(cansqueeze, tosqueeze)
+        willsqueeze = cansqueeze if cansqueeze < tosqueeze else tosqueeze
 
         # Extract bytes from state and directly update output_buf
         for _ in range(willsqueeze):
