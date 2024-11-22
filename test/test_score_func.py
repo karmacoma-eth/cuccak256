@@ -82,13 +82,15 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     four_fours = (shifted & 0xFFFF) == 0x4444
     score += four_fours * 40
     if four_fours:
-        print(f"four 4s, {score=}")
+        print(f"four 4s, {score=}, {hex(overextended)=}, {hex(shifted)=}")
     else:
         print(f"no four 4s, {hex(overextended)=}, {hex(shifted)=}")
 
     # Check next nibble
-    next_nibble = (shifted >> 16) & 0xF
+    next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
     score += (next_nibble != 0x4) * 20
+    print(f"next_nibble={hex(next_nibble)} {score=}")
+
     # add 1 point for every 4 nibble
     num_fours = 0
     for i in range(12, 32):
@@ -135,6 +137,11 @@ def score_addr(addr_hexstr: str) -> int:
         # ),
         pytest.param(
             "0x00000000004444d3cB22EA006470e100Eb014F2D", 166, id="lots_of_zeros"
+        ),
+        pytest.param(
+            "0x0000000000d34444cB22EA006470e100Eb014F2D",
+            166,
+            id="zeros_and_fours_not_contiguous",
         ),
         pytest.param(
             "0x0000000000d34444cB22EA006470e100Eb014F2D",
