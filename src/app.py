@@ -89,7 +89,7 @@ def get_initcode_hash() -> bytes:
     return initcode_hash
 
 
-def create2_addr(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> bytes:
+def create2_hash(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> bytes:
     """
     Compute a single CREATE2 address on the CPU
     """
@@ -105,7 +105,7 @@ def create2_addr(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> byt
     if len(salt) != 32:
         raise ValueError(f"expected salt to be 32 bytes, got {len(salt)}")
 
-    return keccak256(b"\xff" + deployer_addr + salt + initcode_hash)[12:]
+    return keccak256(b"\xff" + deployer_addr + salt + initcode_hash)
 
 
 def add_to_log(logfile: str, msg: str):
@@ -141,25 +141,30 @@ def score_func_uniswap_v4_host(hash: np.ndarray) -> np.int32:
         | (uint32(hash[14]) << 8)
         | uint32(hash[15])
     )
-    if word0 != 0:
-        return 0
+    clz_word0 = clz(uint32(word0))
 
-    # Count leading zero nibbles starting from byte 4
-    leading_zero_bits = 32  # First 32 bits are zero
+    # XXX avoid short-circuiting for verification purposes
+    # if word0 != 0:
+    #     return 0
 
-    # Combine bytes 4-7 into a 32-bit word
-    word1 = (
-        (uint32(hash[16]) << 24)
-        | (uint32(hash[17]) << 16)
-        | (uint32(hash[18]) << 8)
-        | uint32(hash[19])
-    )
+    leading_zero_bits = clz_word0
 
-    leading_zero_bits += clz(uint32(word1))
+    if clz_word0 == 32:
+        # Count leading zero nibbles starting from byte 4
+        # Combine bytes 4-7 into a 32-bit word
+        word1 = (
+            (uint32(hash[16]) << 24)
+            | (uint32(hash[17]) << 16)
+            | (uint32(hash[18]) << 8)
+            | uint32(hash[19])
+        )
+
+        # Use CUDA clz to count leading zero bits in word1
+        clz_word1 = clz(uint32(word1))
+        leading_zero_bits += clz_word1
+
     leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
-
     score = leading_zero_nibbles * 10
-    # print(f"{leading_zero_nibbles=} {score=}")
 
     nibble_idx = 24 + leading_zero_nibbles
 
@@ -207,7 +212,7 @@ def score_func_uniswap_v4_host(hash: np.ndarray) -> np.int32:
     score += num_fours
     # print(f"num_fours={num_fours} {score=}")
 
-    return score
+    return int(score)
 
 
 def format_elapsed(elapsed: float) -> str:
@@ -245,7 +250,7 @@ def main():
         with console.status("initializing...") as status:
             while True:
                 start_time = time.perf_counter()
-                score, salt = create2_search(
+                score_approx, salt = create2_search(
                     deployer_addr,
                     initcode_hash,
                     salt_prefix=salt_prefix,
@@ -259,15 +264,18 @@ def main():
 
                 elapsed_total = time.perf_counter() - absolute_start_time
 
-                address = create2_addr(deployer_addr, salt, initcode_hash)
-                msg_base = f"{score=} addr={address.hex()} salt={salt.hex()} [{format_elapsed(elapsed_total)}]"
+                hash = create2_hash(deployer_addr, salt, initcode_hash)
+                score_actual = score_func_uniswap_v4_host(hash)
+
+                address = hash[12:]
+                msg_base = f"{score_approx=} {score_actual=} addr={address.hex()} salt={salt.hex()} [{format_elapsed(elapsed_total)}]"
                 status.update(status=f"{msg_base} [light gray]({throughput:,.0f} hashes/s)")
 
-                actual_score = score_func_uniswap_v4_host(address)
-                if actual_score >= best_score:
-                    best_score = actual_score
+
+                if score_actual > 0 and score_actual >= best_score:
+                    best_score = score_actual
                     console.print(f"🏆 {msg_base}")
-                    add_to_log(logfile, f"{score},{address.hex()},{salt.hex()}")
+                    add_to_log(logfile, f"{score_actual},{address.hex()},{salt.hex()}")
 
                 # uncomment when profiling with ncu
                 # break

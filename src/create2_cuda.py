@@ -427,26 +427,28 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
         | (uint32(hash[14]) << 8)
         | uint32(hash[15])
     )
-    if word0 != 0:
-        return 0
+    clz_word0 = cuda.clz(uint32(word0))
 
-    # Count leading zero nibbles starting from byte 4
-    leading_zero_bits = 32  # First 32 bits are zero
+    # XXX avoid short-circuiting for verification purposes
+    # if word0 != 0:
+    #     return 0
 
-    # Combine bytes 4-7 into a 32-bit word
-    word1 = (
-        (uint32(hash[16]) << 24)
-        | (uint32(hash[17]) << 16)
-        | (uint32(hash[18]) << 8)
-        | uint32(hash[19])
-    )
+    leading_zero_bits = clz_word0
 
-    # Use CUDA clz to count leading zero bits in word1
-    clz_word1 = cuda.clz(uint32(word1))
-    if clz_word1 > 32:
-        print("warn: ", word1, " has ", clz_word1, " leading zeros")
+    if clz_word0 == 32:
+        # Count leading zero nibbles starting from byte 4
+        # Combine bytes 4-7 into a 32-bit word
+        word1 = (
+            (uint32(hash[16]) << 24)
+            | (uint32(hash[17]) << 16)
+            | (uint32(hash[18]) << 8)
+            | uint32(hash[19])
+        )
 
-    leading_zero_bits += cuda.clz(uint32(word1))
+        # Use CUDA clz to count leading zero bits in word1
+        clz_word1 = cuda.clz(uint32(word1))
+        leading_zero_bits += clz_word1
+
     leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
     score = leading_zero_nibbles * 10
 
