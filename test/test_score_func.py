@@ -7,7 +7,6 @@ def clz(x: np.uint32) -> np.int32:
     """Count leading zeros in a 32-bit integer"""
     if x == 0:
         return 32
-
     # Built-in bit_length() gives position of highest set bit
     return 32 - int(x).bit_length()
 
@@ -47,7 +46,7 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     )
 
     # Use CUDA clz to count leading zero bits in word1
-    leading_zero_bits += clz(word1)
+    leading_zero_bits += clz(uint32(word1))
     leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
 
     score = leading_zero_nibbles * 10
@@ -88,7 +87,7 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
 
     # Check next nibble
     next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
-    score += (next_nibble != 0x4) * 20
+    score += four_fours * (next_nibble != 0x4) * 20
     print(f"next_nibble={hex(next_nibble)} {score=}")
 
     # add 1 point for every 4 nibble
@@ -119,40 +118,20 @@ def score_addr(addr_hexstr: str) -> int:
 
 
 @pytest.mark.parametrize(
-    "addr_hexstr, expected_score",
+    "addr_hexstr, expected_score, desc",
     [
-        # Basic cases
-        ("0x0000000044449d1061679743a49F04B817fFde6c", 147),
-        ("0x000000004444e44Ba6FA1c49573F9c64E3AcAdb1", 148),
-        pytest.param(
-            "0x000000000444406D3bBA81Cd60aecDd06166f136",
-            154,
-            id="odd_leading_zero_nibbles",
-        ),
-        # pytest.param(  # Commented test case
-        #     "0x00000004444Dc6335C3721F0dc7cF4340d344444",
-        #     161,
-        #     id="last_4_nibbles_are_4s",
-        #     marks=pytest.mark.skip(reason="fails fast exit criteria")
-        # ),
-        pytest.param(
-            "0x00000000004444d3cB22EA006470e100Eb014F2D", 166, id="lots_of_zeros"
-        ),
-        pytest.param(
-            "0x0000000000d34444cB22EA006470e100Eb014F2D",
-            166,
-            id="zeros_and_fours_not_contiguous",
-        ),
-        pytest.param(
-            "0x0000000000d34444cB22EA006470e100Eb014F2D",
-            166,
-            id="zeros_and_fours_not_contiguous",
-        ),
+        ("0x0000000044449d1061679743a49F04B817fFde6c", 147, "basic"),
+        ("0x000000004444e44Ba6FA1c49573F9c64E3AcAdb1", 148, "basic"),
+        ("0x000000000444406D3bBA81Cd60aecDd06166f136", 154, "odd_leading_zero_nibbles"),
+        ("0x00000000004444d3cB22EA006470e100Eb014F2D", 166, "lots_of_zeros"),
+        ("0x0000000000d34444cB22EA006470e100Eb014F2D", 166, "zeros_and_fours_not_contiguous"),
+        ("0x000000000fCb2919EbCC5148761023400D1907DC", 92, "no four 4s"),
     ],
 )
-def test_uniswap_v4_score_func(addr_hexstr: str, expected_score: int):
+def test_uniswap_v4_score_func(addr_hexstr: str, expected_score: int, desc: str):
     """Test score function with various addresses"""
 
+    print(f"{desc=}")
     assert score_addr(addr_hexstr) == expected_score
 
 

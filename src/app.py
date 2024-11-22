@@ -3,7 +3,9 @@ import sys
 import time
 
 from numba import cuda
-from rich import print, console
+from rich import print
+from rich.console import Console
+from rich.status import Status
 
 from create2_cuda import create2_search
 from keccak256_numba import keccak256
@@ -34,16 +36,17 @@ def print_device_info():
 
 
 def get_salt_prefix() -> bytes:
-    prefix = bytes.fromhex(os.environ.get("SALT_PREFIX", "00" * 20))
+    prefix_str = os.environ.get("SALT_PREFIX", "00" * 20)
+    prefix_str = prefix_str[2:] if prefix_str.startswith("0x") else prefix_str
+    prefix = bytes.fromhex(prefix_str)
     if len(prefix) > 20:
         raise ValueError("SALT_PREFIX must be 20 bytes or less")
 
     if len(prefix) < 20:
         # pad right
-        print(
-            f"padding SALT_PREFIX={prefix.hex()} with {20 - len(prefix)} bytes of \\x00"
-        )
-        prefix = prefix + b"\x00" * (20 - len(prefix))
+        padding = 20 - len(prefix)
+        print(f"padding SALT_PREFIX={prefix.hex()} with {padding} null bytes")
+        prefix = prefix + b"\x00" * padding
 
     return prefix
 
@@ -53,6 +56,11 @@ def get_deployer_addr() -> bytes:
     if not deployer_addr_str:
         raise ValueError("DEPLOYER_ADDR environment variable is not set")
 
+    deployer_addr_str = (
+        deployer_addr_str[2:]
+        if deployer_addr_str.startswith("0x")
+        else deployer_addr_str
+    )
     deployer_addr = bytes.fromhex(deployer_addr_str)
     if len(deployer_addr) != 20:
         raise ValueError(
@@ -67,6 +75,11 @@ def get_initcode_hash() -> bytes:
     if not initcode_hash_str:
         raise ValueError("INITCODE_HASH environment variable is not set")
 
+    initcode_hash_str = (
+        initcode_hash_str[2:]
+        if initcode_hash_str.startswith("0x")
+        else initcode_hash_str
+    )
     initcode_hash = bytes.fromhex(initcode_hash_str)
     if len(initcode_hash) != 32:
         raise ValueError(
@@ -98,7 +111,7 @@ def create2_addr(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> byt
 def main():
     mp_count = cuda.current_context().device.MULTIPROCESSOR_COUNT
     threads_per_block = 256
-    hashes_per_thread = 256
+    hashes_per_thread = 2**14
     num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
 
     best_score = 0
@@ -112,34 +125,36 @@ def main():
         print(f"error: {e}")
         sys.exit(1)
 
+    console = Console()
+
     try:
-        while True:
-            start_time = time.perf_counter()
-            score, salt = create2_search(
-                deployer_addr,
-                initcode_hash,
-                salt_prefix=salt_prefix,
-                num_hashes=num_hashes,
-                threads_per_block=threads_per_block,
-                hashes_per_thread=hashes_per_thread,
-            )
+        with console.status("initializing...") as status:
+            while True:
+                start_time = time.perf_counter()
+                score, salt = create2_search(
+                    deployer_addr,
+                    initcode_hash,
+                    salt_prefix=salt_prefix,
+                    num_hashes=num_hashes,
+                    threads_per_block=threads_per_block,
+                    hashes_per_thread=hashes_per_thread,
+                )
 
-            elapsed = time.perf_counter() - start_time
-            throughput = num_hashes / elapsed
-            print(
-                f"{num_hashes:,.0f} hashes computed in {elapsed:.3f} seconds ({throughput:,.0f} hashes/sec)"
-            )
+                elapsed = time.perf_counter() - start_time
+                throughput = num_hashes / elapsed
 
-            address = create2_addr(deployer_addr, salt, initcode_hash)
-            console.status(f"0x{address.hex()} ({throughput:,.0f} hashes/s)")
+                address = create2_addr(deployer_addr, salt, initcode_hash)
+                status.update(status=f"0x{address.hex()} ({throughput:,.0f} hashes/s)")
 
-            if score > best_score:
-                best_score = score
-                elapsed = time.perf_counter() - absolute_start_time
-                print(f"🏆 {score=} (salt={salt.hex()}) [{elapsed:.2f}s]")
+                if score > best_score:
+                    best_score = score
+                    elapsed = time.perf_counter() - absolute_start_time
+                    console.print(f"🏆 {score=} addr={address.hex()} (salt={salt.hex()}) [{elapsed:.2f}s]")
+
+                break
 
     except KeyboardInterrupt:
-        print(f"interrupted after {time.perf_counter() - absolute_start_time:.2f}s")
+        print(f"interrupted after {time.perf_counter() - absolute_start_time:.0f}s")
 
 
 if __name__ == "__main__":

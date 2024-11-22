@@ -1,9 +1,8 @@
 """SHA3 implementation in Python in functional style"""
 
-import os
 import numpy as np
 import time
-from numba import cuda, uint8, uint64
+from numba import cuda, uint8, uint32, uint64
 
 # Fixed rate for Keccak-256
 RATE = 136
@@ -398,12 +397,97 @@ def keccak256_single(data: bytes, output_ptr: np.ndarray):
 
 
 @cuda.jit(device=True)
-def score_func(hash):
+def score_func_leading_zeros(hash) -> np.int32:
     score = np.int32(0)
     for i in range(12, 32):  # hash[12:] in bytes
         if hash[i] != 0:
             break
         score += 1
+    return score
+
+
+@cuda.jit(device=True)
+def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
+    """
+    Approximate score function for Uniswap v4 (optimized for CUDA)
+
+    10 points for every leading 0 nibble
+    40 points if the first 4 is followed by 3 more 4s
+    20 points if the first nibble after the four 4s is NOT a 4
+    20 points if the last 4 nibbles are 4s
+    1 point for every 4
+
+    Note: the address starts at hash[12:]
+    """
+
+    # Fast exit if the first 4 bytes are not zero
+    word0 = (uint32(hash[12]) << 24) | (uint32(hash[13]) << 16) | \
+            (uint32(hash[14]) << 8) | uint32(hash[15])
+    if word0 != 0:
+        return 0
+
+    # Count leading zero nibbles starting from byte 4
+    leading_zero_bits = 32  # First 32 bits are zero
+
+    # Combine bytes 4-7 into a 32-bit word
+    word1 = (uint32(hash[16]) << 24) | (uint32(hash[17]) << 16) | \
+            (uint32(hash[18]) << 8) | uint32(hash[19])
+
+    # Use CUDA clz to count leading zero bits in word1
+    clz_word1 = cuda.clz(uint32(word1))
+    if clz_word1 > 32:
+        print("warn: ", word1, " has ", clz_word1, " leading zeros")
+
+    leading_zero_bits += cuda.clz(uint32(word1))
+    leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
+    score = leading_zero_nibbles * 10
+
+    nibble_idx = 24 + leading_zero_nibbles
+    for i in range(nibble_idx >> 1, 32):
+        byte = hash[i]
+        if byte >> 4 == 0x4:
+            nibble_idx = i * 2
+            break
+        if byte & 0xF == 0x4:
+            nibble_idx = i * 2 + 1
+            break
+
+    # Check for four consecutive 4s starting at nibble_idx
+    # Create a mask based on whether nibble_idx is odd or even
+    byte_idx = nibble_idx >> 1
+    is_odd = nibble_idx & 1
+    shift_amount = 8 - is_odd * 4
+
+    # Combine 3 bytes and shift based on alignment
+    overextended = (
+        (uint32(hash[byte_idx]) << 16)
+        | (uint32(hash[byte_idx + 1]) << 8)
+        | uint32(hash[byte_idx + 2])
+    )
+    shifted = overextended >> shift_amount
+
+    # Check for four consecutive 4s starting at nibble_idx
+    four_fours = (shifted & 0xFFFF) == 0x4444
+    score += four_fours * 40
+
+    # Check next nibble
+    next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
+    score += four_fours * (next_nibble != 0x4) * 20
+
+    # add 1 point for every 4 nibble
+    num_fours = 0
+    for i in range(12, 32):
+        byte = hash[i]
+        if byte >> 4 == 0x4:
+            num_fours += 1
+        if byte & 0xF == 0x4:
+            num_fours += 1
+
+    # if the last 4 nibbles are 4s
+    if hash[30] == 0x44 and hash[31] == 0x44:
+        score += 20
+
+    score += num_fours
     return score
 
 
@@ -469,7 +553,7 @@ def create2_search_kernel(
         keccak256_single(data, hash_output)
 
         # Score the hash
-        score = score_func(hash_output)
+        score = score_func_uniswap_v4(hash_output)
         if score > thread_best_score and score > 1:
             thread_best_score = score
             thread_best_salt = (
@@ -487,10 +571,9 @@ def create2_search_kernel(
     stride = threads_per_block // 2
     while stride > 0:
         if thread_index < stride:
-            far_index = thread_index + stride
-            if smem_best_scores[far_index] > smem_best_scores[thread_index]:
-                smem_best_scores[thread_index] = smem_best_scores[far_index]
-                smem_best_salts[thread_index] = smem_best_salts[far_index]
+            if smem_best_scores[thread_index + stride] > smem_best_scores[thread_index]:
+                smem_best_scores[thread_index] = smem_best_scores[thread_index + stride]
+                smem_best_salts[thread_index] = smem_best_salts[thread_index + stride]
         cuda.syncthreads()
         stride //= 2
 
