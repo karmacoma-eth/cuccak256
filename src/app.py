@@ -108,6 +108,11 @@ def create2_addr(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> byt
     return keccak256(b"\xff" + deployer_addr + salt + initcode_hash)[12:]
 
 
+def add_to_log(msg: str):
+    with open("log.txt", "a") as f:
+        f.write(msg + "\n")
+
+
 def main():
     mp_count = cuda.current_context().device.MULTIPROCESSOR_COUNT
     threads_per_block = 256
@@ -126,6 +131,9 @@ def main():
         sys.exit(1)
 
     console = Console()
+
+    with open("log.txt", "w") as f:
+        f.write("score,addr,salt\n")
 
     try:
         with console.status("initializing...") as status:
@@ -146,12 +154,14 @@ def main():
                 address = create2_addr(deployer_addr, salt, initcode_hash)
                 status.update(status=f"0x{address.hex()} ({throughput:,.0f} hashes/s)")
 
-                if score > best_score:
+                if score >= best_score:
                     best_score = score
                     elapsed = time.perf_counter() - absolute_start_time
                     console.print(f"🏆 {score=} addr={address.hex()} (salt={salt.hex()}) [{elapsed:.2f}s]")
+                    add_to_log(f"{score},{address.hex()},{salt.hex()}")
 
-                break
+                # uncomment when profiling with ncu
+                # break
 
     except KeyboardInterrupt:
         print(f"interrupted after {time.perf_counter() - absolute_start_time:.0f}s")
