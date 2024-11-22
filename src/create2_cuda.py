@@ -46,8 +46,8 @@ _DSBYTE = 0x01
 _NUM_ROUNDS = 24
 
 
-@cuda.jit(device=True)
-def _rol(x: uint64, s: uint64) -> uint64:
+@cuda.jit(device=True, inline=True)
+def _rol(x: uint64, s: uint64) -> uint64: # type: ignore
     """
     Rotates x left by s
 
@@ -61,7 +61,7 @@ def _rol(x: uint64, s: uint64) -> uint64:
     return (uint64(x) << uint64(s)) ^ (uint64(x) >> uint64(64 - s))
 
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, inline=True)
 def _keccak_f(state: np.ndarray) -> np.ndarray:
     """
     The keccak_f permutation function, unrolled for performance
@@ -228,7 +228,7 @@ def _keccak_f(state: np.ndarray) -> np.ndarray:
     return state
 
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, inline=True)
 def _absorb(
     state: np.ndarray, data: bytes, buf: np.ndarray, buf_idx: int
 ) -> tuple[np.ndarray, np.ndarray, int]:
@@ -265,7 +265,7 @@ def _absorb(
     return state, buf, buf_idx
 
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, inline=True)
 def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.ndarray):
     """
     Performs the squeeze operation of the sponge construction
@@ -302,7 +302,7 @@ def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.nd
         tosqueeze -= willsqueeze
 
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, inline=True)
 def _pad(
     state: np.ndarray, buf: np.ndarray, buf_idx: int
 ) -> tuple[np.ndarray, np.ndarray, int]:
@@ -324,7 +324,7 @@ def _pad(
     return _permute(state, buf, buf_idx)
 
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, inline=True)
 def _permute(state, buf, buf_idx):
     """
     Permutes the internal state and buffer for thorough mixing.
