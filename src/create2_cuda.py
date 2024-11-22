@@ -37,7 +37,7 @@ _KECCAK_RC = np.array(
 
 
 @cuda.jit(device=True, inline=True)
-def _rol(x: uint64, s: uint64) -> uint64: # type: ignore
+def _rol(x: uint64, s: uint64) -> uint64:  # type: ignore
     """
     Rotates x left by s
 
@@ -219,9 +219,7 @@ def _keccak_f(state: np.ndarray) -> np.ndarray:
 
 
 @cuda.jit(device=True, inline=True)
-def _absorb(
-    state: np.ndarray, data: bytes, buf: np.ndarray, buf_idx: int
-) -> tuple[np.ndarray, np.ndarray, int]:
+def _absorb(state: np.ndarray, data: bytes, buf: np.ndarray, buf_idx: int) -> int:
     """
     Absorbs input data into the sponge construction
 
@@ -232,8 +230,6 @@ def _absorb(
         buf_idx (int): Current index in the buffer
 
     Returns:
-        state (device array): The updated state array after absorbing
-        data (device array): The updated buffer after absorbing
         int: The updated index in the buffer
     """
     todo = len(data)
@@ -247,11 +243,11 @@ def _absorb(
         buf_idx += willabsorb
         if buf_idx == 136:
             # Ensure _permute is also device-friendly
-            state, buf, buf_idx = _permute(state, buf, buf_idx)
+            buf_idx = _permute(state, buf)
         todo -= willabsorb
         i += willabsorb
 
-    return state, buf, buf_idx # XXX try returning just buf_idx
+    return buf_idx
 
 
 @cuda.jit(device=True, inline=True)
@@ -286,7 +282,7 @@ def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.nd
 
             # If we've processed a full rate's worth of data, permute
             if buf_idx == 136:
-                state, buf, buf_idx = _permute(state, buf, 0)
+                buf_idx = _permute(state, buf)
 
         tosqueeze -= willsqueeze
 
@@ -294,7 +290,7 @@ def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.nd
 @cuda.jit(device=True, inline=True)
 def _pad(
     state: np.ndarray, buf: np.ndarray, buf_idx: int
-) -> tuple[np.ndarray, np.ndarray, int]:
+) -> int:
     """
     Pads the input data in the buffer.
 
@@ -304,28 +300,23 @@ def _pad(
         buf_idx (int): Current index in the buffer
 
     Returns:
-        device array: The updated state array after padding
-        device array: The updated buffer after padding
         int: The updated index in the buffer
     """
     buf[buf_idx] ^= 0x01  # domain separation byte
     buf[135] ^= 0x80  # RATE -1
-    return _permute(state, buf, buf_idx)
+    return _permute(state, buf)
 
 
 @cuda.jit(device=True, inline=True)
-def _permute(state, buf, buf_idx):
+def _permute(state, buf) -> int:
     """
     Permutes the internal state and buffer for thorough mixing.
 
     Args:
         state (device array): The state array of the SHA-3 sponge construction
         buf (device array): The buffer to permute
-        buf_idx (int): Current index in the buffer
 
     Returns:
-        device array: The updated state array after permutation
-        device array: The updated buffer after permutation
         int: The updated index in the buffer
     """
     # Process bytes to uint64 and XOR directly into state
@@ -339,12 +330,11 @@ def _permute(state, buf, buf_idx):
     # Perform Keccak permutation
     state = _keccak_f(state)
 
-    # Reset buf_idx and buf
-    buf_idx = 0
+    # Reset buf
     for i in range(200):
         buf[i] = 0
 
-    return state, buf, buf_idx
+    return 0
 
 
 @cuda.jit(device=True)
@@ -355,10 +345,12 @@ def keccak256_single_wrapped(data: bytes, output_ptr: np.ndarray):
 
 
 @cuda.jit(device=True)
-def keccak256_single(data: bytes, # input, 85xu8
-                     output_ptr: np.ndarray, # output, 32xu8
-                     state: np.ndarray, # local, 25xu64
-                     buf: np.ndarray): # local, 200xu8
+def keccak256_single(
+    data: bytes,  # input, 85xu8
+    output_ptr: np.ndarray,  # output, 32xu8
+    state: np.ndarray,  # local, 25xu64
+    buf: np.ndarray,
+):  # local, 200xu8
     """Computes a single Keccak256 hash on the device
 
     Args:
@@ -366,7 +358,6 @@ def keccak256_single(data: bytes, # input, 85xu8
         output_buf (array): Buffer to write the hash result to
         output_idx (int): Index in output buffer to write the result
     """
-    buf_idx = 0
 
     # Initialize state and buffer
     for i in range(25):
@@ -375,10 +366,10 @@ def keccak256_single(data: bytes, # input, 85xu8
         buf[i] = 0
 
     # Absorb data
-    state, buf, buf_idx = _absorb(state, data, buf, buf_idx)
+    buf_idx = _absorb(state, data, buf, 0)
 
     # Pad
-    state, buf, buf_idx = _pad(state, buf, buf_idx)
+    buf_idx = _pad(state, buf, buf_idx)
 
     # Squeeze
     _squeeze(state, buf, buf_idx, output_ptr)
