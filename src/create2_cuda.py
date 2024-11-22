@@ -328,22 +328,13 @@ def _permute(state, buf, buf_idx):
         device array: The updated buffer after permutation
         int: The updated index in the buffer
     """
-    # Create a temporary state array
-    temp_state = cuda.local.array(25, dtype=uint64)
-    for i in range(25):
-        temp_state[i] = 0
-
-    # Process bytes to uint64
+    # Process bytes to uint64 and XOR directly into state
     for i in range(0, len(buf), 8):
         if i + 8 <= len(buf):  # Ensure there's enough data to read
             uint64_val = uint64(0)
             for j in range(8):
                 uint64_val |= uint64(buf[i + j]) << (j * 8)
-            temp_state[i // 8] = uint64_val
-
-    # Manually perform bitwise XOR for each element
-    for i in range(25):
-        state[i] ^= temp_state[i]
+            state[i // 8] ^= uint64_val
 
     # Perform Keccak permutation
     state = _keccak_f(state)
