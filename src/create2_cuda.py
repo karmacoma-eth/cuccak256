@@ -421,8 +421,12 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     """
 
     # Fast exit if the first 4 bytes are not zero
-    word0 = (uint32(hash[12]) << 24) | (uint32(hash[13]) << 16) | \
-            (uint32(hash[14]) << 8) | uint32(hash[15])
+    word0 = (
+        (uint32(hash[12]) << 24)
+        | (uint32(hash[13]) << 16)
+        | (uint32(hash[14]) << 8)
+        | uint32(hash[15])
+    )
     if word0 != 0:
         return 0
 
@@ -430,8 +434,12 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     leading_zero_bits = 32  # First 32 bits are zero
 
     # Combine bytes 4-7 into a 32-bit word
-    word1 = (uint32(hash[16]) << 24) | (uint32(hash[17]) << 16) | \
-            (uint32(hash[18]) << 8) | uint32(hash[19])
+    word1 = (
+        (uint32(hash[16]) << 24)
+        | (uint32(hash[17]) << 16)
+        | (uint32(hash[18]) << 8)
+        | uint32(hash[19])
+    )
 
     # Use CUDA clz to count leading zero bits in word1
     clz_word1 = cuda.clz(uint32(word1))
@@ -652,6 +660,32 @@ def to_device_array(data: bytes) -> np.ndarray:
     return cuda.to_device(np.frombuffer(data, dtype=np.uint8))
 
 
+@cuda.jit
+def score_kernel(hash: np.ndarray, score_out: np.ndarray):
+    """Kernel must modify its arguments instead of returning values"""
+    score_out[0] = score_func_uniswap_v4(hash)
+
+
+def score_address(addr_bytes: bytes) -> int:
+    hash_d = to_device_array(addr_bytes)
+    score_d = cuda.device_array(1, dtype=np.int32)
+    score_kernel[1, 1](hash_d, score_d)
+    return int(score_d.copy_to_host()[0])
+
+
+def check_expected_score(addr_hexstr: str, expected_score: int):
+    assert len(addr_hexstr) == 40 or len(addr_hexstr) == 42
+    addr_hexstr = addr_hexstr[2:] if addr_hexstr.startswith("0x") else addr_hexstr
+    left_pad = b"\x00" * 12
+    hash = left_pad + bytes.fromhex(addr_hexstr)
+    score = score_address(hash)
+    print(f"checking that {hash.hex()} scores {score} == {expected_score} ", end="")
+    if score == expected_score:
+        print("✅")
+    else:
+        print(f"❌ {score=} != {expected_score=}")
+
+
 def check_expected_addr(
     deployer_addr: bytes, salt: bytes, initcode_hash: bytes, expected_addr: bytes
 ):
@@ -695,6 +729,10 @@ def main():
         empty_hash,
         bytes.fromhex("E33C0C7F7df4809055C3ebA6c09CFe4BaF1BD9e0"),
     )
+
+    check_expected_score("0x0000000000d34444cB22EA006470e100Eb014F2D", 0)
+    check_expected_score("0x00000000004444d3cB22EA006470e100Eb014F2D", 160)
+    check_expected_score("0x000000000444406D3bBA81Cd60aecDd06166f136", 150)
 
     print("measuring throughput... ")
 
