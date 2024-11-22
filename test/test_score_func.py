@@ -11,7 +11,7 @@ def clz(x: np.uint32) -> np.int32:
     return 32 - int(x).bit_length()
 
 
-def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
+def score_func_uniswap_v4_host(hash: np.ndarray) -> np.int32:
     """
     Approximate score function for Uniswap v4 (optimized for CUDA)
 
@@ -50,7 +50,7 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
 
     score = leading_zero_nibbles * 10
-    print(f"{leading_zero_nibbles=} {score=}")
+    # print(f"{leading_zero_nibbles=} {score=}")
 
     nibble_idx = 24 + leading_zero_nibbles
 
@@ -70,16 +70,16 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
 
     # Check for four 4s
     if (shifted & 0xFFFF) != 0x4444:
-        print(f"no four 4s, worth 0 points {hex(overextended)=}, {hex(shifted)=}")
+        # print(f"no four 4s, worth 0 points {hex(overextended)=}, {hex(shifted)=}")
         return 0
 
     score += 40
-    print(f"four 4s, {score=}, {hex(overextended)=}, {hex(shifted)=}")
+    # print(f"four 4s, {score=}, {hex(overextended)=}, {hex(shifted)=}")
 
     # Check next nibble
     next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
     score += (next_nibble != 0x4) * 20
-    print(f"next_nibble={hex(next_nibble)} {score=}")
+    # print(f"next_nibble={hex(next_nibble)} {score=}")
 
     # add 1 point for every 4 nibble
     num_fours = 0
@@ -93,10 +93,10 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     # if the last 4 nibbles are 4s
     if hash[30] == 0x44 and hash[31] == 0x44:
         score += 20
-        print(f"last 4 nibbles are 4s, {score=}")
+        # print(f"last 4 nibbles are 4s, {score=}")
 
     score += num_fours
-    print(f"num_fours={num_fours} {score=}")
+    # print(f"num_fours={num_fours} {score=}")
 
     return score
 
@@ -105,7 +105,7 @@ def score_addr(addr_hexstr: str) -> int:
     left_pad = b"\x44" * 12
     addr_hexstr = addr_hexstr[2:] if addr_hexstr.startswith("0x") else addr_hexstr
     hash = np.frombuffer(left_pad + bytes.fromhex(addr_hexstr), dtype=np.uint8)
-    return score_func_uniswap_v4(hash)
+    return score_func_uniswap_v4_host(hash)
 
 
 @pytest.mark.parametrize(

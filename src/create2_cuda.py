@@ -443,14 +443,6 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     score = leading_zero_nibbles * 10
 
     nibble_idx = 24 + leading_zero_nibbles
-    for i in range(nibble_idx >> 1, 32):
-        byte = hash[i]
-        if byte >> 4 == 0x4:
-            nibble_idx = i * 2
-            break
-        if byte & 0xF == 0x4:
-            nibble_idx = i * 2 + 1
-            break
 
     # Check for four consecutive 4s starting at nibble_idx
     # Create a mask based on whether nibble_idx is odd or even
@@ -468,26 +460,30 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
 
     # Check for four consecutive 4s starting at nibble_idx
     four_fours = (shifted & 0xFFFF) == 0x4444
-    score += four_fours * 40
+    if not four_fours:
+        return 0
+
+    score += 40
 
     # Check next nibble
     next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
-    score += four_fours * (next_nibble != 0x4) * 20
+    score += (next_nibble != 0x4) * 20
 
+    # NOTE: skipping this on device to save some time
+    # ---
     # add 1 point for every 4 nibble
-    num_fours = 0
-    for i in range(12, 32):
-        byte = hash[i]
-        if byte >> 4 == 0x4:
-            num_fours += 1
-        if byte & 0xF == 0x4:
-            num_fours += 1
+    # num_fours = 0
+    # for i in range(12, 32):
+    #     byte = hash[i]
+    #     if byte >> 4 == 0x4:
+    #         num_fours += 1
+    #     if byte & 0xF == 0x4:
+    #         num_fours += 1
 
     # if the last 4 nibbles are 4s
     if hash[30] == 0x44 and hash[31] == 0x44:
         score += 20
 
-    score += num_fours
     return score
 
 

@@ -2,10 +2,10 @@ import os
 import sys
 import time
 
-from numba import cuda
+from numba import cuda, uint32
+import numpy as np
 from rich import print
 from rich.console import Console
-from rich.status import Status
 
 from create2_cuda import create2_search
 from keccak256_numba import keccak256
@@ -108,9 +108,113 @@ def create2_addr(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> byt
     return keccak256(b"\xff" + deployer_addr + salt + initcode_hash)[12:]
 
 
-def add_to_log(msg: str):
-    with open("log.txt", "a") as f:
+def add_to_log(logfile: str, msg: str):
+    with open(logfile, "a") as f:
         f.write(msg + "\n")
+
+
+def clz(x: np.uint32) -> np.int32:
+    """Count leading zeros in a 32-bit integer"""
+    if x == 0:
+        return 32
+    # Built-in bit_length() gives position of highest set bit
+    return 32 - int(x).bit_length()
+
+
+def score_func_uniswap_v4_host(hash: np.ndarray) -> np.int32:
+    """
+    Approximate score function for Uniswap v4 (optimized for CUDA)
+
+    10 points for every leading 0 nibble
+    40 points if the first 4 is followed by 3 more 4s
+    20 points if the first nibble after the four 4s is NOT a 4
+    20 points if the last 4 nibbles are 4s
+    1 point for every 4
+
+    Note: the address starts at hash[12:]
+    """
+
+    # Fast exit if the first 4 bytes are not zero
+    word0 = (
+        (uint32(hash[12]) << 24)
+        | (uint32(hash[13]) << 16)
+        | (uint32(hash[14]) << 8)
+        | uint32(hash[15])
+    )
+    if word0 != 0:
+        return 0
+
+    # Count leading zero nibbles starting from byte 4
+    leading_zero_bits = 32  # First 32 bits are zero
+
+    # Combine bytes 4-7 into a 32-bit word
+    word1 = (
+        (uint32(hash[16]) << 24)
+        | (uint32(hash[17]) << 16)
+        | (uint32(hash[18]) << 8)
+        | uint32(hash[19])
+    )
+
+    leading_zero_bits += clz(uint32(word1))
+    leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
+
+    score = leading_zero_nibbles * 10
+    # print(f"{leading_zero_nibbles=} {score=}")
+
+    nibble_idx = 24 + leading_zero_nibbles
+
+    # Check for four consecutive 4s starting at nibble_idx
+    # Create a mask based on whether nibble_idx is odd or even
+    byte_idx = nibble_idx >> 1
+    is_odd = nibble_idx & 1
+    shift_amount = 8 - is_odd * 4
+
+    # Combine 3 bytes and shift based on alignment
+    overextended = (
+        (uint32(hash[byte_idx]) << 16)
+        | (uint32(hash[byte_idx + 1]) << 8)
+        | uint32(hash[byte_idx + 2])
+    )
+    shifted = overextended >> shift_amount
+
+    # Check for four 4s
+    if (shifted & 0xFFFF) != 0x4444:
+        # print(f"no four 4s, worth 0 points {hex(overextended)=}, {hex(shifted)=}")
+        return 0
+
+    score += 40
+    # print(f"four 4s, {score=}, {hex(overextended)=}, {hex(shifted)=}")
+
+    # Check next nibble
+    next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
+    score += (next_nibble != 0x4) * 20
+    # print(f"next_nibble={hex(next_nibble)} {score=}")
+
+    # add 1 point for every 4 nibble
+    num_fours = 0
+    for i in range(12, 32):
+        byte = hash[i]
+        if byte >> 4 == 0x4:
+            num_fours += 1
+        if byte & 0xF == 0x4:
+            num_fours += 1
+
+    # if the last 4 nibbles are 4s
+    if hash[30] == 0x44 and hash[31] == 0x44:
+        score += 20
+        # print(f"last 4 nibbles are 4s, {score=}")
+
+    score += num_fours
+    # print(f"num_fours={num_fours} {score=}")
+
+    return score
+
+
+def format_elapsed(elapsed: float) -> str:
+    hours = int(elapsed // 3600)
+    minutes = int((elapsed % 3600) // 60)
+    seconds = elapsed % 60
+    return f"{hours:02d}h{minutes:02d}m{seconds:05.2f}s"
 
 
 def main():
@@ -132,8 +236,10 @@ def main():
 
     console = Console()
 
-    with open("log.txt", "w") as f:
+    logfile = f"log-{time.strftime('%Y%m%d%H%M%S')}.txt"
+    with open(logfile, "w") as f:
         f.write("score,addr,salt\n")
+    print(f"writing interesting results to {logfile}")
 
     try:
         with console.status("initializing...") as status:
@@ -148,23 +254,26 @@ def main():
                     hashes_per_thread=hashes_per_thread,
                 )
 
-                elapsed = time.perf_counter() - start_time
-                throughput = num_hashes / elapsed
+                elapsed_batch = time.perf_counter() - start_time
+                throughput = num_hashes / elapsed_batch
+
+                elapsed_total = time.perf_counter() - absolute_start_time
 
                 address = create2_addr(deployer_addr, salt, initcode_hash)
-                status.update(status=f"0x{address.hex()} ({throughput:,.0f} hashes/s)")
+                msg_base = f"{score=} addr={address.hex()} salt={salt.hex()} [{format_elapsed(elapsed_total)}]"
+                status.update(status=f"{msg_base} [light gray]({throughput:,.0f} hashes/s)")
 
-                if score >= best_score:
-                    best_score = score
-                    elapsed = time.perf_counter() - absolute_start_time
-                    console.print(f"🏆 {score=} addr={address.hex()} (salt={salt.hex()}) [{elapsed:.2f}s]")
-                    add_to_log(f"{score},{address.hex()},{salt.hex()}")
+                actual_score = score_func_uniswap_v4_host(address)
+                if actual_score >= best_score:
+                    best_score = actual_score
+                    console.print(f"🏆 {msg_base}")
+                    add_to_log(logfile, f"{score},{address.hex()},{salt.hex()}")
 
                 # uncomment when profiling with ncu
                 # break
 
     except KeyboardInterrupt:
-        print(f"interrupted after {time.perf_counter() - absolute_start_time:.0f}s")
+        print(f"interrupted after {format_elapsed(time.perf_counter() - absolute_start_time)}")
 
 
 if __name__ == "__main__":
