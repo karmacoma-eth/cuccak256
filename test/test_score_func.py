@@ -1,5 +1,7 @@
 import numpy as np
+import pytest
 from numba import uint32
+
 
 def clz(x: np.uint32) -> np.int32:
     """Count leading zeros in a 32-bit integer"""
@@ -24,8 +26,12 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     """
 
     # Fast exit if the first 4 bytes are not zero
-    word0 = (uint32(hash[12]) << 24) | (uint32(hash[13]) << 16) | \
-            (uint32(hash[14]) << 8) | uint32(hash[15])
+    word0 = (
+        (uint32(hash[12]) << 24)
+        | (uint32(hash[13]) << 16)
+        | (uint32(hash[14]) << 8)
+        | uint32(hash[15])
+    )
     if word0 != 0:
         return 0
 
@@ -33,8 +39,12 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     leading_zero_bits = 32  # First 32 bits are zero
 
     # Combine bytes 4-7 into a 32-bit word
-    word1 = (uint32(hash[16]) << 24) | (uint32(hash[17]) << 16) | \
-            (uint32(hash[18]) << 8) | uint32(hash[19])
+    word1 = (
+        (uint32(hash[16]) << 24)
+        | (uint32(hash[17]) << 16)
+        | (uint32(hash[18]) << 8)
+        | uint32(hash[19])
+    )
 
     # Use CUDA clz to count leading zero bits in word1
     leading_zero_bits += clz(word1)
@@ -45,7 +55,6 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
 
     nibble_idx = 24 + leading_zero_nibbles
 
-    # XXX need to look for the first 4 nibble, it could be after the leading zero nibbles
     for i in range(nibble_idx >> 1, 32):
         byte = hash[i]
         if byte >> 4 == 0x4:
@@ -56,31 +65,30 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
             break
 
     # Check for four consecutive 4s starting at nibble_idx
-    if nibble_idx & 1 == 0:
-        # nibble_idx is even, so we can just check the next 2 bytes
-        byte_idx = nibble_idx >> 1
-        if hash[byte_idx] == 0x44 and hash[byte_idx + 1] == 0x44:
-            score += 40
+    # Create a mask based on whether nibble_idx is odd or even
+    byte_idx = nibble_idx >> 1
+    is_odd = nibble_idx & 1
+    shift_amount = 8 - is_odd * 4
 
-        # Check if the next nibble is not a 4
-        next_nibble = hash[byte_idx + 2] >> 4
-        if next_nibble != 0x4:
-            score += 20
+    # Combine 3 bytes and shift based on alignment
+    overextended = (
+        (uint32(hash[byte_idx]) << 16)
+        | (uint32(hash[byte_idx + 1]) << 8)
+        | uint32(hash[byte_idx + 2])
+    )
+    shifted = overextended >> shift_amount
 
+    # Check for four 4s
+    four_fours = (shifted & 0xFFFF) == 0x4444
+    score += four_fours * 40
+    if four_fours:
+        print(f"four 4s, {score=}")
     else:
-        # nibble_idx is odd, so we got so shifting to do
-        byte_idx = nibble_idx >> 1
-        overextended = (uint32(hash[byte_idx]) << 16) | (uint32(hash[byte_idx + 1]) << 8) | uint32(hash[byte_idx + 2])
-        shifted = overextended >> 4
-        if shifted == 0x4444:
-            score += 40
-            print(f"first 4 nibble followed by 3 more 4s, {score=}")
+        print(f"no four 4s, {hex(overextended)=}, {hex(shifted)=}")
 
-        next_nibble = overextended & 0xF
-        if next_nibble != 0x4:
-            score += 20
-            print(f"first nibble after 4 4s is not 4, {score=}")
-
+    # Check next nibble
+    next_nibble = (shifted >> 16) & 0xF
+    score += (next_nibble != 0x4) * 20
     # add 1 point for every 4 nibble
     num_fours = 0
     for i in range(12, 32):
@@ -108,25 +116,42 @@ def score_addr(addr_hexstr: str) -> int:
     return score_func_uniswap_v4(hash)
 
 
-def test_uniswap_v4_score_func():
-    # should not contribute to score
-    left_pad = b"\x44" * 12
-
-    for addr_hexstr, expected_score in [
+@pytest.mark.parametrize(
+    "addr_hexstr, expected_score",
+    [
+        # Basic cases
         ("0x0000000044449d1061679743a49F04B817fFde6c", 147),
         ("0x000000004444e44Ba6FA1c49573F9c64E3AcAdb1", 148),
-        ("0x000000000444406D3bBA81Cd60aecDd06166f136", 154), # odd leading zero nibbles
-        # ("0x00000004444Dc6335C3721F0dc7cF4340d344444", 161), # last 4 nibbles are 4s (but fails our fast exit criteria)
-        ("0x00000000004444d3cB22EA006470e100Eb014F2D", 166), # lots of zeros
-        ("0x0000000000d34444cB22EA006470e100Eb014F2D", 166), # 0s and 4s not contiguous
-    ]:
+        pytest.param(
+            "0x000000000444406D3bBA81Cd60aecDd06166f136",
+            154,
+            id="odd_leading_zero_nibbles",
+        ),
+        # pytest.param(  # Commented test case
+        #     "0x00000004444Dc6335C3721F0dc7cF4340d344444",
+        #     161,
+        #     id="last_4_nibbles_are_4s",
+        #     marks=pytest.mark.skip(reason="fails fast exit criteria")
+        # ),
+        pytest.param(
+            "0x00000000004444d3cB22EA006470e100Eb014F2D", 166, id="lots_of_zeros"
+        ),
+        pytest.param(
+            "0x0000000000d34444cB22EA006470e100Eb014F2D",
+            166,
+            id="zeros_and_fours_not_contiguous",
+        ),
+    ],
+)
+def test_uniswap_v4_score_func(addr_hexstr: str, expected_score: int):
+    """Test score function with various addresses"""
 
-        hash = np.frombuffer(left_pad + bytes.fromhex(addr_hexstr[2:]), dtype=np.uint8)
-        assert score_func_uniswap_v4(hash) == expected_score
+    assert score_addr(addr_hexstr) == expected_score
 
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) > 1:
         print(score_addr(sys.argv[1]))
     else:
