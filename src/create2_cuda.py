@@ -4,10 +4,6 @@ import numpy as np
 import time
 from numba import cuda, uint8, uint32, uint64
 
-# Fixed rate for Keccak-256
-RATE = 136
-BIT_LENGTH = 256
-
 # Keccak round constants
 _KECCAK_RC = np.array(
     [
@@ -39,12 +35,6 @@ _KECCAK_RC = np.array(
     dtype=np.uint64,
 )
 
-# Domain separation byte
-_DSBYTE = 0x01
-
-# Number of Keccak rounds
-_NUM_ROUNDS = 24
-
 
 @cuda.jit(device=True, inline=True)
 def _rol(x: uint64, s: uint64) -> uint64: # type: ignore
@@ -74,7 +64,7 @@ def _keccak_f(state: np.ndarray) -> np.ndarray:
     """
 
     # 24 rounds of permutation
-    for i in range(_NUM_ROUNDS):
+    for i in range(24):
         # Parity calculation unrolled
         bc0 = state[0] ^ state[5] ^ state[10] ^ state[15] ^ state[20]
         bc1 = state[1] ^ state[6] ^ state[11] ^ state[16] ^ state[21]
@@ -237,32 +227,31 @@ def _absorb(
 
     Args:
         state (device array): The state array of the SHA-3 sponge construction
-        rate (int): The rate of the sponge function
         data (device array): The input data to be absorbed
         buf (device array): The buffer to absorb the input into
         buf_idx (int): Current index in the buffer
 
     Returns:
-        device array: The updated state array after absorbing
-        device array: The updated buffer after absorbing
+        state (device array): The updated state array after absorbing
+        data (device array): The updated buffer after absorbing
         int: The updated index in the buffer
     """
     todo = len(data)
     i = 0
     while todo > 0:
-        cando = RATE - buf_idx
+        cando = 136 - buf_idx
         willabsorb = min(cando, todo)
         for j in range(willabsorb):
             # Directly manipulate each byte rather than using numpy operations
             buf[buf_idx + j] ^= data[i + j]
         buf_idx += willabsorb
-        if buf_idx == RATE:
+        if buf_idx == 136:
             # Ensure _permute is also device-friendly
             state, buf, buf_idx = _permute(state, buf, buf_idx)
         todo -= willabsorb
         i += willabsorb
 
-    return state, buf, buf_idx
+    return state, buf, buf_idx # XXX try returning just buf_idx
 
 
 @cuda.jit(device=True, inline=True)
@@ -277,12 +266,12 @@ def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.nd
         output_ptr (device array): Pointer to where the hash output should be written
     """
 
-    tosqueeze = BIT_LENGTH // 8
+    tosqueeze = 32  # keccak256 byte hash length
     local_output_idx = 0  # Tracks where to insert bytes into output_buf
 
     # Squeeze output
     while tosqueeze > 0:
-        cansqueeze = RATE - buf_idx
+        cansqueeze = 136 - buf_idx  # RATE - buf_idx
         willsqueeze = min(cansqueeze, tosqueeze)
 
         # Extract bytes from state and directly update output_buf
@@ -296,7 +285,7 @@ def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.nd
             local_output_idx += 1
 
             # If we've processed a full rate's worth of data, permute
-            if buf_idx == RATE:
+            if buf_idx == 136:
                 state, buf, buf_idx = _permute(state, buf, 0)
 
         tosqueeze -= willsqueeze
@@ -319,8 +308,8 @@ def _pad(
         device array: The updated buffer after padding
         int: The updated index in the buffer
     """
-    buf[buf_idx] ^= _DSBYTE
-    buf[RATE - 1] ^= 0x80
+    buf[buf_idx] ^= 0x01  # domain separation byte
+    buf[135] ^= 0x80  # RATE -1
     return _permute(state, buf, buf_idx)
 
 
