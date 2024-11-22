@@ -551,7 +551,7 @@ def create2_search(
 
     full_salt = salt_prefix + run_id + int(best_salt).to_bytes(8, "big")
     assert len(full_salt) == 32
-    return best_score, full_salt
+    return int(best_score), full_salt
 
 
 def create2_helper(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> bytes:

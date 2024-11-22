@@ -101,6 +101,13 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     return score
 
 
+def score_addr(addr_hexstr: str) -> int:
+    left_pad = b"\x44" * 12
+    addr_hexstr = addr_hexstr[2:] if addr_hexstr.startswith("0x") else addr_hexstr
+    hash = np.frombuffer(left_pad + bytes.fromhex(addr_hexstr), dtype=np.uint8)
+    return score_func_uniswap_v4(hash)
+
+
 def test_uniswap_v4_score_func():
     # should not contribute to score
     left_pad = b"\x44" * 12
@@ -116,3 +123,12 @@ def test_uniswap_v4_score_func():
 
         hash = np.frombuffer(left_pad + bytes.fromhex(addr_hexstr[2:]), dtype=np.uint8)
         assert score_func_uniswap_v4(hash) == expected_score
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1:
+        print(score_addr(sys.argv[1]))
+    else:
+        print("usage: test_score_func.py <address>")
+        sys.exit(1)

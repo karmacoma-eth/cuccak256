@@ -3,6 +3,7 @@ import sys
 import time
 
 from numba import cuda
+from rich import print, console
 
 from create2_cuda import create2_search
 from keccak256_numba import keccak256
@@ -130,7 +131,7 @@ def main():
             )
 
             address = create2_addr(deployer_addr, salt, initcode_hash)
-            print(f"address: 0x{address.hex()}")
+            console.status(f"0x{address.hex()} ({throughput:,.0f} hashes/s)")
 
             if score > best_score:
                 best_score = score
