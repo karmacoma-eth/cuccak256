@@ -214,40 +214,21 @@ def _keccak_f(state: np.ndarray):
 
 
 @cuda.jit(device=True, inline=True)
-def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.ndarray):
+def _squeeze(state: np.ndarray, buf: np.ndarray, output_ptr: np.ndarray):
     """
     Performs the squeeze operation of the sponge construction
 
     Args:
         state (device array): The state array of the SHA-3 sponge construction
         buf (device array): The buffer to squeeze the output into
-        buf_idx (int): Current index in the buffer
         output_ptr (device array): Pointer to where the hash output should be written
     """
 
-    tosqueeze = 32  # keccak256 byte hash length
-    local_output_idx = 0  # Tracks where to insert bytes into output_buf
-
-    # Squeeze output
-    while tosqueeze > 0:
-        cansqueeze = 136 - buf_idx  # RATE - buf_idx
-        willsqueeze = cansqueeze if cansqueeze < tosqueeze else tosqueeze
-
-        # Extract bytes from state and directly update output_buf
-        for _ in range(willsqueeze):
-            byte_index = buf_idx & 7  # modulo 8
-            byte_val = (state[buf_idx >> 3] >> (byte_index * 8)) & 0xFF
-
-            output_ptr[local_output_idx] = byte_val
-
-            buf_idx += 1
-            local_output_idx += 1
-
-            # If we've processed a full rate's worth of data, permute
-            if buf_idx == 136:
-                buf_idx = _permute(state, buf)
-
-        tosqueeze -= willsqueeze
+    # Extract bytes from state and directly update output_buf
+    for i in range(32):  # keccak256 byte hash length
+        byte_index = i & 7  # modulo 8
+        byte_val = (state[i >> 3] >> (byte_index * 8)) & 0xFF
+        output_ptr[i] = byte_val
 
 
 @cuda.jit(device=True, inline=True)
@@ -314,10 +295,10 @@ def keccak256_single(
     for i in range(86, 200):
         buf[i] = 0
     buf[135] = 0x80  # RATE - 1
-    buf_idx = _permute(state, buf)
+    _permute(state, buf)
 
     # Squeeze
-    _squeeze(state, buf, buf_idx, output_ptr)
+    _squeeze(state, buf, output_ptr)
 
 
 @cuda.jit(device=True)
