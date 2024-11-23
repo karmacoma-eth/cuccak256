@@ -16,6 +16,7 @@ from create2_cuda import BatchResult, CudaParams, SearchParams, create2_search
 
 console = Console()
 
+
 def print_device_info():
     cuda.detect()
 
@@ -222,6 +223,43 @@ def format_elapsed(elapsed: float) -> str:
     return f"{hours:02d}h{minutes:02d}m{seconds:05.2f}s"
 
 
+class HostSideResult:
+    def __init__(self, batch_result: BatchResult):
+        self.batch_result = batch_result
+
+        # generate the hash on the host from the search params and salt in the result
+        self.hash = create2_hash(
+            batch_result.search_params.deployer_addr,
+            batch_result.salt,
+            batch_result.search_params.initcode_hash,
+        )
+
+        # extract the address from the hash
+        self.address = self.hash[12:]
+
+        # compute the actual score on the host
+        self.actual_score = score_func_uniswap_v4_host(self.hash)
+
+    @property
+    def approx_score(self) -> int:
+        return self.batch_result.approx_score
+
+    @property
+    def throughput(self) -> float:
+        return self.batch_result.throughput
+
+    @property
+    def salt(self) -> bytes:
+        return self.batch_result.salt
+
+    @property
+    def elapsed(self) -> float:
+        return self.batch_result.elapsed
+
+    @property
+    def device_id(self) -> int:
+        return self.batch_result.device_id
+
 
 class Leaderboard:
     def __init__(self, num_devices: int):
@@ -229,7 +267,7 @@ class Leaderboard:
         self.best_address = b"\x00" * 20
         self.best_salt = b"\x00" * 32
 
-        self.latest_results = [None] * num_devices
+        self.latest_results: list[HostSideResult | None] = [None] * num_devices
 
         self.absolute_start_time = time.perf_counter()
         self.logfile = f"log-{time.strftime('%Y%m%d%H%M%S')}.txt"
@@ -249,29 +287,44 @@ class Leaderboard:
 
         for i, result in enumerate(self.latest_results):
             if result is None:
-                table.add_row(f"{i}", "[gray]n/a[/gray]", "[gray]n/a[/gray]", "[gray]n/a[/gray]", "[gray]n/a[/gray]")
+                table.add_row(
+                    f"{i}",
+                    "[gray]n/a[/gray]",
+                    "[gray]n/a[/gray]",
+                    "[gray]n/a[/gray]",
+                    "[gray]n/a[/gray]",
+                )
                 continue
 
             throughput = result.throughput
-            address = result.hash[12:].hex()
-            salt = result.salt.hex()
-            table.add_row(f"{result.device_id}", f"{result.actual_score}", f"0x{address}", f"{salt}", f"{throughput / 1e6:,.0f} Mh/s")
+            table.add_row(
+                f"{result.device_id}",
+                f"{result.actual_score}",
+                f"0x{result.address.hex()}",
+                f"{result.salt.hex()}",
+                f"{throughput / 1e6:,.0f} Mh/s",
+            )
         return table
 
-    def update(self, result: BatchResult, live: Live):
+    def update(self, batch_result: BatchResult, live: Live):
+        result = HostSideResult(batch_result)
         self.latest_results[result.device_id] = result
         live.update(self.generate_table())
 
-        elapsed_total = time.perf_counter() - self.absolute_start_time
         actual_score = result.actual_score
-        address = result.hash[12:]
-        salt = result.salt.hex()
-        msg_base = f"score={result.approx_score}/{actual_score} addr=0x{address.hex()} {salt=} device={result.cuda_params.device_id} [{format_elapsed(elapsed_total)}]"
-
         if actual_score >= self.best_score:
             self.best_score = actual_score
-            console.print(f"  {msg_base}")
-            self._add_to_log(f"{actual_score},{address.hex()},{result.salt.hex()}")
+            self._add_to_log(
+                f"{actual_score},0x{result.address.hex()},{result.salt.hex()}"
+            )
+
+            elapsed_total = time.perf_counter() - self.absolute_start_time
+            msg = f"score={result.approx_score}/{actual_score}"
+            msg += f" salt={result.salt.hex()}"
+            msg += f" addr=0x{result.address.hex()}"
+            msg += f" device={result.device_id}"
+            msg += f" [{format_elapsed(elapsed_total)}]"
+            console.print(f"  {msg}")
 
 
 def gpu_worker(
@@ -332,7 +385,9 @@ def main():
 
     # Monitor status updates
     try:
-        with Live(leaderboard.generate_table(), auto_refresh=4, console=console) as live:
+        with Live(
+            leaderboard.generate_table(), auto_refresh=4, console=console
+        ) as live:
             while any(t.is_alive() for t in threads):
                 while not results_queue.empty():
                     result: BatchResult = results_queue.get()

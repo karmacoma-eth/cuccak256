@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 from numba import cuda, uint8, uint32, uint64
 
+from typing import Callable
 
 @dataclass
 class CudaParams:
@@ -50,19 +51,6 @@ class BatchResult:
     @property
     def throughput(self) -> float:
         return self.num_hashes / self.elapsed
-
-    @property
-    def hash(self) -> bytes:
-        if self._hash is None:
-            self._hash = create2_hash(self.search_params.deployer_addr, self.salt, self.search_params.initcode_hash)
-        return self._hash
-
-    @property
-    def actual_score(self) -> int:
-        if self._actual_score is None:
-            self._actual_score = score_func_uniswap_v4_host(self.hash)
-        return self._actual_score
-
 
 
 # Keccak round constants
@@ -572,8 +560,8 @@ def create2_search(
 ) -> BatchResult:
     start_time = time.perf_counter()
 
-    num_hashes = search_params.num_hashes
-    hashes_per_thread = search_params.hashes_per_thread
+    num_hashes = cuda_params.num_hashes
+    hashes_per_thread = cuda_params.hashes_per_thread
     threads_per_block = cuda_params.threads_per_block
 
     # Calculate total number of threads and blocks
