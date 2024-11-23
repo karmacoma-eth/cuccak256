@@ -214,24 +214,6 @@ def _keccak_f(state: np.ndarray):
 
 
 @cuda.jit(device=True, inline=True)
-def _squeeze(state: np.ndarray, buf: np.ndarray, output_ptr: np.ndarray):
-    """
-    Performs the squeeze operation of the sponge construction
-
-    Args:
-        state (device array): The state array of the SHA-3 sponge construction
-        buf (device array): The buffer to squeeze the output into
-        output_ptr (device array): Pointer to where the hash output should be written
-    """
-
-    # Extract bytes from state and directly update output_buf
-    for i in range(32):  # keccak256 byte hash length
-        byte_index = i & 7  # modulo 8
-        byte_val = (state[i >> 3] >> (byte_index * 8)) & 0xFF
-        output_ptr[i] = byte_val
-
-
-@cuda.jit(device=True, inline=True)
 def _permute(state, buf) -> int:
     """
     Permutes the internal state and buffer for thorough mixing.
@@ -295,10 +277,51 @@ def keccak256_single(
     for i in range(86, 200):
         buf[i] = 0
     buf[135] = 0x80  # RATE - 1
+
+    # Permute
     _permute(state, buf)
 
-    # Squeeze
-    _squeeze(state, buf, output_ptr)
+    # Squeeze, unrolled
+    s0 = state[0]
+    s1 = state[1]
+    s2 = state[2]
+    s3 = state[3]
+
+    output_ptr[0] = (s0 >> 0) & 0xFF
+    output_ptr[1] = (s0 >> 8) & 0xFF
+    output_ptr[2] = (s0 >> 16) & 0xFF
+    output_ptr[3] = (s0 >> 24) & 0xFF
+    output_ptr[4] = (s0 >> 32) & 0xFF
+    output_ptr[5] = (s0 >> 40) & 0xFF
+    output_ptr[6] = (s0 >> 48) & 0xFF
+    output_ptr[7] = (s0 >> 56) & 0xFF
+
+    output_ptr[8] = (s1 >> 0) & 0xFF
+    output_ptr[9] = (s1 >> 8) & 0xFF
+    output_ptr[10] = (s1 >> 16) & 0xFF
+    output_ptr[11] = (s1 >> 24) & 0xFF
+    output_ptr[12] = (s1 >> 32) & 0xFF
+    output_ptr[13] = (s1 >> 40) & 0xFF
+    output_ptr[14] = (s1 >> 48) & 0xFF
+    output_ptr[15] = (s1 >> 56) & 0xFF
+
+    output_ptr[16] = (s2 >> 0) & 0xFF
+    output_ptr[17] = (s2 >> 8) & 0xFF
+    output_ptr[18] = (s2 >> 16) & 0xFF
+    output_ptr[19] = (s2 >> 24) & 0xFF
+    output_ptr[20] = (s2 >> 32) & 0xFF
+    output_ptr[21] = (s2 >> 40) & 0xFF
+    output_ptr[22] = (s2 >> 48) & 0xFF
+    output_ptr[23] = (s2 >> 56) & 0xFF
+
+    output_ptr[24] = (s3 >> 0) & 0xFF
+    output_ptr[25] = (s3 >> 8) & 0xFF
+    output_ptr[26] = (s3 >> 16) & 0xFF
+    output_ptr[27] = (s3 >> 24) & 0xFF
+    output_ptr[28] = (s3 >> 32) & 0xFF
+    output_ptr[29] = (s3 >> 40) & 0xFF
+    output_ptr[30] = (s3 >> 48) & 0xFF
+    output_ptr[31] = (s3 >> 56) & 0xFF
 
 
 @cuda.jit(device=True)
