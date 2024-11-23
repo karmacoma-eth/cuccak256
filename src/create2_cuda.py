@@ -403,34 +403,19 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     Note: the address starts at hash[12:]
     """
 
+    if hash[12] != 0 or hash[13] != 0:
+        return 0
+
     # Fast exit if the first 4 bytes are not zero
-    word0 = (
-        (uint32(hash[12]) << 24)
-        | (uint32(hash[13]) << 16)
-        | (uint32(hash[14]) << 8)
-        | uint32(hash[15])
+    next4 = uint32(
+        (uint32(hash[14]) << 24)
+        | (uint32(hash[15]) << 16)
+        | (uint32(hash[16]) << 8)
+        | uint32(hash[17])
     )
-    clz_word0 = cuda.clz(uint32(word0))
 
-    # XXX avoid short-circuiting for verification purposes
-    # if word0 != 0:
-    #     return 0
-
-    leading_zero_bits = clz_word0
-
-    if clz_word0 == 32:
-        # Count leading zero nibbles starting from byte 4
-        # Combine bytes 4-7 into a 32-bit word
-        word1 = (
-            (uint32(hash[16]) << 24)
-            | (uint32(hash[17]) << 16)
-            | (uint32(hash[18]) << 8)
-            | uint32(hash[19])
-        )
-
-        # Use CUDA clz to count leading zero bits in word1
-        clz_word1 = cuda.clz(uint32(word1))
-        leading_zero_bits += clz_word1
+    clz_next4 = cuda.clz(next4)
+    leading_zero_bits = 16 + clz_next4
 
     leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
     score = leading_zero_nibbles * 10
@@ -462,16 +447,7 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
     score += (next_nibble != 0x4) * 20
 
-    # NOTE: skipping this on device to save some time
-    # ---
-    # add 1 point for every 4 nibble
-    # num_fours = 0
-    # for i in range(12, 32):
-    #     byte = hash[i]
-    #     if byte >> 4 == 0x4:
-    #         num_fours += 1
-    #     if byte & 0xF == 0x4:
-    #         num_fours += 1
+    # NOTE: we don't count the number of 4s in hash on the device to save some time
 
     # if the last 4 nibbles are 4s
     if hash[30] == 0x44 and hash[31] == 0x44:
