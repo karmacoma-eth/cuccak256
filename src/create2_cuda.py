@@ -403,23 +403,30 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     Note: the address starts at hash[12:]
     """
 
-    if hash[12] != 0 or hash[13] != 0:
-        return 0
-
-    # Fast exit if the first 4 bytes are not zero
-    next4 = uint32(
-        (uint32(hash[14]) << 24)
-        | (uint32(hash[15]) << 16)
-        | (uint32(hash[16]) << 8)
-        | uint32(hash[17])
+    word0 = (
+        (uint32(hash[12]) << 24)
+        | (uint32(hash[13]) << 16)
+        | (uint32(hash[14]) << 8)
+        | uint32(hash[15])
     )
+    clz_word0 = cuda.clz(uint32(word0))
 
-    clz_next4 = cuda.clz(next4)
-    leading_zero_bits = 16 + clz_next4
+    leading_zero_bits = clz_word0
+    if clz_word0 == 32:
+        # Count leading zero nibbles starting from byte 4
+        # Combine bytes 4-7 into a 32-bit word
+        word1 = (
+            (uint32(hash[16]) << 24)
+            | (uint32(hash[17]) << 16)
+            | (uint32(hash[18]) << 8)
+            | uint32(hash[19])
+        )
+        # Use CUDA clz to count leading zero bits in word1
+        clz_word1 = cuda.clz(uint32(word1))
+        leading_zero_bits += clz_word1
 
-    leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
+    leading_zero_nibbles = leading_zero_bits >> 2
     score = leading_zero_nibbles * 10
-
     nibble_idx = 24 + leading_zero_nibbles
 
     # Check for four consecutive 4s starting at nibble_idx
