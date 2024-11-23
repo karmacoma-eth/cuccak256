@@ -9,6 +9,8 @@ import numpy as np
 from numba import cuda, uint32
 from rich import print
 from rich.console import Console
+from rich.live import Live
+from rich.table import Table
 
 from keccak256_numba import keccak256
 
@@ -222,9 +224,13 @@ def format_elapsed(elapsed: float) -> str:
 
 @dataclass
 class CudaParams:
-    mp_count: int
+    device_id: int
     threads_per_block: int
     hashes_per_thread: int
+
+    @property
+    def mp_count(self) -> int:
+        return cuda.gpus[self.device_id].MULTIPROCESSOR_COUNT
 
     @property
     def num_hashes(self) -> int:
@@ -240,18 +246,46 @@ class SearchParams:
 
 @dataclass
 class BatchResult:
-    score_approx: int
+    approx_score: int
     salt: bytes
     elapsed: float
     cuda_params: CudaParams
     search_params: SearchParams
+    _hash: bytes | None = None
+    _actual_score: int | None = None
+
+    @property
+    def device_id(self) -> int:
+        return self.cuda_params.device_id
+
+    @property
+    def num_hashes(self) -> int:
+        return self.cuda_params.num_hashes
+
+    @property
+    def throughput(self) -> float:
+        return self.num_hashes / self.elapsed
+
+    @property
+    def hash(self) -> bytes:
+        if self._hash is None:
+            self._hash = create2_hash(self.search_params.deployer_addr, self.salt, self.search_params.initcode_hash)
+        return self._hash
+
+    @property
+    def actual_score(self) -> int:
+        if self._actual_score is None:
+            self._actual_score = score_func_uniswap_v4_host(self.hash)
+        return self._actual_score
 
 
 class Leaderboard:
-    def __init__(self):
+    def __init__(self, num_devices: int):
         self.best_score = 0
         self.best_address = b"\x00" * 20
         self.best_salt = b"\x00" * 32
+
+        self.latest_results = [None] * num_devices
 
         self.absolute_start_time = time.perf_counter()
         self.logfile = f"log-{time.strftime('%Y%m%d%H%M%S')}.txt"
@@ -261,28 +295,39 @@ class Leaderboard:
         with open(self.logfile, "a") as f:
             f.write(msg + "\n")
 
-    def update(self, result: BatchResult, status):
-        throughput = result.cuda_params.num_hashes / result.elapsed
+    def generate_table(self) -> Table:
+        table = Table()
+        table.add_column("device")
+        table.add_column("score")
+        table.add_column("address", min_width=42)
+        table.add_column("salt", min_width=64)
+        table.add_column("throughput", min_width=10)
 
-        status.update(
-            status=f"Device {result.device_id}: {result.score_approx} [{format_elapsed(result.elapsed)}] ({throughput:,.0f} hashes/s)"
-        )
+        for i, result in enumerate(self.latest_results):
+            if result is None:
+                table.add_row(f"{i}", "[gray]n/a[/gray]", "[gray]n/a[/gray]", "[gray]n/a[/gray]", "[gray]n/a[/gray]")
+                continue
+
+            throughput = result.throughput
+            address = result.hash[12:].hex()
+            salt = result.salt.hex()
+            table.add_row(f"{result.device_id}", f"{result.actual_score}", f"0x{address}", f"{salt}", f"{throughput / 1e6:,.0f} Mh/s")
+        return table
+
+    def update(self, result: BatchResult, live: Live):
+        self.latest_results[result.device_id] = result
+        live.update(self.generate_table())
 
         elapsed_total = time.perf_counter() - self.absolute_start_time
+        actual_score = result.actual_score
+        address = result.hash[12:]
+        salt = result.salt.hex()
+        msg_base = f"score={result.approx_score}/{actual_score} addr=0x{address.hex()} {salt=} device={result.cuda_params.device_id} [{format_elapsed(elapsed_total)}]"
 
-        hash = create2_hash(self.deployer_addr, result.salt, self.initcode_hash)
-        score_actual = score_func_uniswap_v4_host(hash)
-
-        address = hash[12:]
-        msg_base = f"{result.score_approx=} {score_actual=} addr={address.hex()} salt={result.salt.hex()} [{format_elapsed(elapsed_total)}]"
-        status.update(
-            status=f"{msg_base} [light gray]({throughput / 1e6:,.0f} Mhashes/s)"
-        )
-
-        if score_actual > 0 and score_actual >= self.best_score:
-            self.best_score = score_actual
+        if actual_score >= self.best_score:
+            self.best_score = actual_score
             console.print(f"  {msg_base}")
-            self._add_to_log(f"{score_actual},{address.hex()},{result.salt.hex()}")
+            self._add_to_log(f"{actual_score},{address.hex()},{result.salt.hex()}")
 
 
 def gpu_worker(
@@ -290,19 +335,23 @@ def gpu_worker(
     search_params: SearchParams,
     results_queue: Queue,
 ):
+    print(f"starting gpu_worker #{cuda_params.device_id}")
     with cuda.gpus[cuda_params.device_id]:
-        # fake results for now
-        import random
+        while True:
+            # fake results for now
+            import random
 
-        results_queue.put(
-            BatchResult(
-                score_approx=random.randint(0, 1000),
-                salt=b"\x00" * 32,
-                elapsed=random.random(),
-                cuda_params=cuda_params,
-                search_params=search_params,
+            time.sleep(random.random() * 10)
+
+            results_queue.put(
+                BatchResult(
+                    approx_score=random.randint(0, 1000),
+                    salt=b"\x00" * 32,
+                    elapsed=random.random(),
+                    cuda_params=cuda_params,
+                    search_params=search_params,
+                )
             )
-        )
 
 
 def main():
@@ -330,7 +379,6 @@ def main():
     for device_id in range(num_devices):
         cuda_params = CudaParams(
             device_id=device_id,
-            mp_count=cuda.current_context().device.MULTIPROCESSOR_COUNT,
             threads_per_block=256,
             hashes_per_thread=2**14,
         )
@@ -342,26 +390,27 @@ def main():
                 search_params,
                 results_queue,
             ),
+            daemon=True,  # don't block exit
         )
         t.start()
         threads.append(t)
 
-    leaderboard = Leaderboard()
+    leaderboard = Leaderboard(num_devices)
     console.print(f"writing interesting results to {leaderboard.logfile}")
 
     # Monitor status updates
     try:
-        with console.status("initializing...") as status:
+        with Live(leaderboard.generate_table(), auto_refresh=4, console=console) as live:
             while any(t.is_alive() for t in threads):
                 while not results_queue.empty():
                     result: BatchResult = results_queue.get()
-                    leaderboard.update(result, status)
+                    leaderboard.update(result, live)
     except KeyboardInterrupt:
         console.print("[red]Interrupted by user.[/red]")
 
-    # Wait for all threads to finish
-    for t in threads:
-        t.join()
+    # actually, don't wait for threads to finish
+    # for t in threads:
+    #     t.join()
 
 
 if __name__ == "__main__":
