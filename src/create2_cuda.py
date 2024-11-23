@@ -276,8 +276,8 @@ def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.nd
 
         # Extract bytes from state and directly update output_buf
         for _ in range(willsqueeze):
-            byte_index = buf_idx % 8
-            byte_val = (state[buf_idx // 8] >> (byte_index * 8)) & 0xFF
+            byte_index = buf_idx & 7  # modulo 8
+            byte_val = (state[buf_idx >> 3] >> (byte_index * 8)) & 0xFF
 
             output_ptr[local_output_idx] = byte_val
 
@@ -329,7 +329,7 @@ def _permute(state, buf) -> int:
             uint64_val = uint64(0)
             for j in range(8):
                 uint64_val |= uint64(buf[i + j]) << (j * 8)
-            state[i // 8] ^= uint64_val
+            state[i >> 3] ^= uint64_val
 
     # Perform Keccak permutation
     state = _keccak_f(state)
@@ -537,14 +537,14 @@ def create2_search_kernel(
     cuda.syncthreads()
 
     # Reduction within block to find the best score and salt
-    stride = threads_per_block // 2
+    stride = threads_per_block >> 1
     while stride > 0:
         if thread_index < stride:
             if smem_best_scores[thread_index + stride] > smem_best_scores[thread_index]:
                 smem_best_scores[thread_index] = smem_best_scores[thread_index + stride]
                 smem_best_salts[thread_index] = smem_best_salts[thread_index + stride]
         cuda.syncthreads()
-        stride //= 2
+        stride >>= 1
 
     # Write block's best score and salt to global memory
     if thread_index == 0:
