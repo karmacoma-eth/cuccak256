@@ -213,73 +213,81 @@ def _keccak_f(state: np.ndarray):
         state[0] ^= _KECCAK_RC[i]
 
 
-@cuda.jit(device=True, inline=True)
-def _permute(state, buf) -> int:
-    """
-    Permutes the internal state and buffer for thorough mixing.
-
-    Args:
-        state (device array): The state array of the SHA-3 sponge construction
-        buf (device array): The buffer to permute
-
-    Returns:
-        int: The updated index in the buffer
-    """
-    # Process bytes to uint64 and XOR directly into state
-    for i in range(0, 200, 8):
-        uint64_val = uint64(0)
-        for j in range(8):
-            uint64_val |= uint64(buf[i + j]) << (j * 8)
-        state[i >> 3] ^= uint64_val
-
-    # Perform Keccak permutation
-    _keccak_f(state)
-
-    # Reset buf
-    for i in range(200):
-        buf[i] = 0
-
-    return 0
-
-
 @cuda.jit(device=True)
 def keccak256_single_wrapped(data: bytes, output_ptr: np.ndarray):
     state = cuda.local.array(25, dtype=uint64)
-    buf = cuda.local.array(200, dtype=uint8)
-    keccak256_single(data, output_ptr, state, buf)
+    keccak256_single(data, output_ptr, state)
 
 
-@cuda.jit(device=True)
+@cuda.jit(device=True, inline=True)
+def load_uint64(buf: np.ndarray, offset: int) -> np.uint64:
+    """
+    Loads 8 bytes from the buffer starting at the given offset and converts them to a uint64
+
+    Args:
+        buf (device array of uint8): The buffer to load from
+        offset (int): The offset in the buffer to start loading from
+
+    Returns:
+        uint64: The loaded uint64 value
+    """
+
+    uint64_val = uint64(0)
+    for j in range(8):
+        uint64_val |= uint64(buf[offset + j]) << (j * 8)
+    return uint64_val
+
+
+@cuda.jit(device=True, inline=True)
+def load_uint64_ds_byte(buf: np.ndarray) -> np.uint64:
+    uint64_val = uint64(0)
+    offset = 80
+    for j in range(5):
+        uint64_val |= uint64(buf[offset + j]) << (j * 8)
+
+    # domain separation byte
+    uint64_val |= uint64(0x01) << 40
+
+    return uint64_val
+
+
+@cuda.jit(device=True, inline=True)
 def keccak256_single(
     data: bytes,  # input, 85xu8
     output_ptr: np.ndarray,  # output, 32xu8
     state: np.ndarray,  # local, 25xu64
-    buf: np.ndarray,
-):  # local, 200xu8
+):
     """Computes a single Keccak256 hash on the device
 
     Args:
         data (bytes): Input data to hash
-        output_buf (array): Buffer to write the hash result to
-        output_idx (int): Index in output buffer to write the result
+        output_ptr (array): Buffer to write the hash result to
     """
 
-    # Initialize state and buffer
-    for i in range(25):
+    # Initialize, absord and pad in one specialized go for create2
+    state[0] = load_uint64(data, 0)
+    state[1] = load_uint64(data, 8)
+    state[2] = load_uint64(data, 16)
+    state[3] = load_uint64(data, 24)
+    state[4] = load_uint64(data, 32)
+    state[5] = load_uint64(data, 40)
+    state[6] = load_uint64(data, 48)
+    state[7] = load_uint64(data, 56)
+    state[8] = load_uint64(data, 64)
+    state[9] = load_uint64(data, 72)
+    state[10] = load_uint64_ds_byte(data)  # DS byte!
+    state[11] = 0
+    state[12] = 0
+    state[13] = 0
+    state[14] = 0
+    state[15] = 0
+    state[16] = uint64(0x80) << 56  # has byte 0x80 at (RATE - 1) = 135
+
+    for i in range(17, 25):
         state[i] = 0
 
-    # Absorb -- just a copy because we know the input is 85 bytes, less than the rate
-    for i in range(85):
-        buf[i] = data[i]
-
-    # Pad
-    buf[85] = 0x01  # domain separation byte
-    for i in range(86, 200):
-        buf[i] = 0
-    buf[135] = 0x80  # RATE - 1
-
-    # Permute
-    _permute(state, buf)
+    # Perform Keccak permutation
+    _keccak_f(state)
 
     # Squeeze, unrolled
     s0 = state[0]
@@ -450,9 +458,8 @@ def create2_search_kernel(
     # allocate local array to store the hash output
     hash_output = cuda.local.array(32, dtype=uint8)
 
-    # allocate local arrays to store the state and buffer out of the main loop
+    # allocate local array for the state out of the main loop
     state = cuda.local.array(25, dtype=uint64)
-    buf = cuda.local.array(200, dtype=uint8)
 
     # global thread id, between 0 and total_number_of_threads
     for idx in range(hashes_per_thread):
@@ -464,7 +471,7 @@ def create2_search_kernel(
         data[52] = idx & 0xFF
 
         # Compute hash
-        keccak256_single(data, hash_output, state, buf)
+        keccak256_single(data, hash_output, state)
 
         # Score the hash
         score = score_func_uniswap_v4(hash_output)
