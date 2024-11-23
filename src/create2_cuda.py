@@ -52,15 +52,12 @@ def _rol(x: uint64, s: uint64) -> uint64:  # type: ignore
 
 
 @cuda.jit(device=True, inline=True)
-def _keccak_f(state: np.ndarray) -> np.ndarray:
+def _keccak_f(state: np.ndarray):
     """
     The keccak_f permutation function, unrolled for performance
 
     Args:
         state (device array): The state array of the SHA-3 sponge construction
-
-    Returns:
-        device array: The updated state array after permutation
     """
 
     # 24 rounds of permutation
@@ -215,44 +212,6 @@ def _keccak_f(state: np.ndarray) -> np.ndarray:
 
         state[0] ^= _KECCAK_RC[i]
 
-    return state
-
-
-@cuda.jit(device=True, inline=True)
-def _absorb(state: np.ndarray, data: bytes, buf: np.ndarray, buf_idx: int) -> int:
-    """
-    Absorbs input data into the sponge construction
-
-    Args:
-        state (device array): The state array of the SHA-3 sponge construction
-        data (device array): The input data to be absorbed
-        buf (device array): The buffer to absorb the input into
-        buf_idx (int): Current index in the buffer
-
-    Returns:
-        int: The updated index in the buffer
-    """
-    todo = len(data)
-    i = 0
-    while todo > 0:
-        cando = 136 - buf_idx
-        willabsorb = cando if cando < todo else todo
-
-        for j in range(willabsorb):
-            # Directly manipulate each byte rather than using numpy operations
-            buf[buf_idx + j] ^= data[i + j]
-
-        buf_idx += willabsorb
-
-        if buf_idx == 136:
-            # Ensure _permute is also device-friendly
-            buf_idx = _permute(state, buf)
-
-        todo -= willabsorb
-        i += willabsorb
-
-    return buf_idx
-
 
 @cuda.jit(device=True, inline=True)
 def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.ndarray):
@@ -292,26 +251,6 @@ def _squeeze(state: np.ndarray, buf: np.ndarray, buf_idx: int, output_ptr: np.nd
 
 
 @cuda.jit(device=True, inline=True)
-def _pad(
-    state: np.ndarray, buf: np.ndarray, buf_idx: int
-) -> int:
-    """
-    Pads the input data in the buffer.
-
-    Args:
-        state (device array): The state array of the SHA-3 sponge construction
-        buf (device array): The buffer to pad the input into
-        buf_idx (int): Current index in the buffer
-
-    Returns:
-        int: The updated index in the buffer
-    """
-    buf[buf_idx] ^= 0x01  # domain separation byte
-    buf[135] ^= 0x80  # RATE -1
-    return _permute(state, buf)
-
-
-@cuda.jit(device=True, inline=True)
 def _permute(state, buf) -> int:
     """
     Permutes the internal state and buffer for thorough mixing.
@@ -324,15 +263,14 @@ def _permute(state, buf) -> int:
         int: The updated index in the buffer
     """
     # Process bytes to uint64 and XOR directly into state
-    for i in range(0, len(buf), 8):
-        if i + 8 <= len(buf):  # Ensure there's enough data to read
-            uint64_val = uint64(0)
-            for j in range(8):
-                uint64_val |= uint64(buf[i + j]) << (j * 8)
-            state[i >> 3] ^= uint64_val
+    for i in range(0, 200, 8):
+        uint64_val = uint64(0)
+        for j in range(8):
+            uint64_val |= uint64(buf[i + j]) << (j * 8)
+        state[i >> 3] ^= uint64_val
 
     # Perform Keccak permutation
-    state = _keccak_f(state)
+    _keccak_f(state)
 
     # Reset buf
     for i in range(200):
@@ -366,14 +304,17 @@ def keccak256_single(
     # Initialize state and buffer
     for i in range(25):
         state[i] = 0
-    for i in range(200):
-        buf[i] = 0
 
-    # Absorb data
-    buf_idx = _absorb(state, data, buf, 0)
+    # Absorb -- just a copy because we know the input is 85 bytes, less than the rate
+    for i in range(85):
+        buf[i] = data[i]
 
     # Pad
-    buf_idx = _pad(state, buf, buf_idx)
+    buf[85] = 0x01  # domain separation byte
+    for i in range(86, 200):
+        buf[i] = 0
+    buf[135] = 0x80  # RATE - 1
+    buf_idx = _permute(state, buf)
 
     # Squeeze
     _squeeze(state, buf, buf_idx, output_ptr)
