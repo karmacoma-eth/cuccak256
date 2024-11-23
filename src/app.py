@@ -1,15 +1,18 @@
 import os
 import sys
 import time
+from dataclasses import dataclass
+from multiprocessing import Queue
+from threading import Thread
 
-from numba import cuda, uint32
 import numpy as np
+from numba import cuda, uint32
 from rich import print
 from rich.console import Console
 
-from create2_cuda import create2_search
 from keccak256_numba import keccak256
 
+console = Console()
 
 def print_device_info():
     cuda.detect()
@@ -142,11 +145,6 @@ def score_func_uniswap_v4_host(hash: np.ndarray) -> np.int32:
         | uint32(hash[15])
     )
     clz_word0 = clz(uint32(word0))
-
-    # XXX avoid short-circuiting for verification purposes
-    # if word0 != 0:
-    #     return 0
-
     leading_zero_bits = clz_word0
 
     if clz_word0 == 32:
@@ -222,66 +220,148 @@ def format_elapsed(elapsed: float) -> str:
     return f"{hours:02d}h{minutes:02d}m{seconds:05.2f}s"
 
 
+@dataclass
+class CudaParams:
+    mp_count: int
+    threads_per_block: int
+    hashes_per_thread: int
+
+    @property
+    def num_hashes(self) -> int:
+        return self.threads_per_block * self.hashes_per_thread * self.mp_count * 8
+
+
+@dataclass
+class SearchParams:
+    deployer_addr: bytes
+    initcode_hash: bytes
+    salt_prefix: bytes
+
+
+@dataclass
+class BatchResult:
+    score_approx: int
+    salt: bytes
+    elapsed: float
+    cuda_params: CudaParams
+    search_params: SearchParams
+
+
+class Leaderboard:
+    def __init__(self):
+        self.best_score = 0
+        self.best_address = b"\x00" * 20
+        self.best_salt = b"\x00" * 32
+
+        self.absolute_start_time = time.perf_counter()
+        self.logfile = f"log-{time.strftime('%Y%m%d%H%M%S')}.txt"
+        self._add_to_log("score,address,salt")
+
+    def _add_to_log(self, msg: str):
+        with open(self.logfile, "a") as f:
+            f.write(msg + "\n")
+
+    def update(self, result: BatchResult, status):
+        throughput = result.cuda_params.num_hashes / result.elapsed
+
+        status.update(
+            status=f"Device {result.device_id}: {result.score_approx} [{format_elapsed(result.elapsed)}] ({throughput:,.0f} hashes/s)"
+        )
+
+        elapsed_total = time.perf_counter() - self.absolute_start_time
+
+        hash = create2_hash(self.deployer_addr, result.salt, self.initcode_hash)
+        score_actual = score_func_uniswap_v4_host(hash)
+
+        address = hash[12:]
+        msg_base = f"{result.score_approx=} {score_actual=} addr={address.hex()} salt={result.salt.hex()} [{format_elapsed(elapsed_total)}]"
+        status.update(
+            status=f"{msg_base} [light gray]({throughput / 1e6:,.0f} Mhashes/s)"
+        )
+
+        if score_actual > 0 and score_actual >= self.best_score:
+            self.best_score = score_actual
+            console.print(f"  {msg_base}")
+            self._add_to_log(f"{score_actual},{address.hex()},{result.salt.hex()}")
+
+
+def gpu_worker(
+    cuda_params: CudaParams,
+    search_params: SearchParams,
+    results_queue: Queue,
+):
+    with cuda.gpus[cuda_params.device_id]:
+        # fake results for now
+        import random
+
+        results_queue.put(
+            BatchResult(
+                score_approx=random.randint(0, 1000),
+                salt=b"\x00" * 32,
+                elapsed=random.random(),
+                cuda_params=cuda_params,
+                search_params=search_params,
+            )
+        )
+
+
 def main():
-    mp_count = cuda.current_context().device.MULTIPROCESSOR_COUNT
-    threads_per_block = 256
-    hashes_per_thread = 2**14
-    num_hashes = threads_per_block * hashes_per_thread * mp_count * 8
-
-    best_score = 0
-    absolute_start_time = time.perf_counter()
-
-    try:
-        deployer_addr = get_deployer_addr()
-        initcode_hash = get_initcode_hash()
-        salt_prefix = get_salt_prefix()
-    except ValueError as e:
-        print(f"error: {e}")
+    # Discover available GPUs
+    num_devices = len(cuda.gpus)
+    if num_devices == 0:
+        console.print("error: no CUDA devices found")
         sys.exit(1)
 
-    console = Console()
-
-    logfile = f"log-{time.strftime('%Y%m%d%H%M%S')}.txt"
-    with open(logfile, "w") as f:
-        f.write("score,addr,salt\n")
-    print(f"writing interesting results to {logfile}")
+    # Shared queue for results
+    results_queue = Queue()
 
     try:
+        search_params = SearchParams(
+            deployer_addr=get_deployer_addr(),
+            initcode_hash=get_initcode_hash(),
+            salt_prefix=get_salt_prefix(),
+        )
+    except ValueError as e:
+        console.print(f"error: {e}")
+        sys.exit(1)
+
+    # Launch a thread for each GPU
+    threads = []
+    for device_id in range(num_devices):
+        cuda_params = CudaParams(
+            device_id=device_id,
+            mp_count=cuda.current_context().device.MULTIPROCESSOR_COUNT,
+            threads_per_block=256,
+            hashes_per_thread=2**14,
+        )
+
+        t = Thread(
+            target=gpu_worker,
+            args=(
+                cuda_params,
+                search_params,
+                results_queue,
+            ),
+        )
+        t.start()
+        threads.append(t)
+
+    leaderboard = Leaderboard()
+    console.print(f"writing interesting results to {leaderboard.logfile}")
+
+    # Monitor status updates
+    try:
         with console.status("initializing...") as status:
-            while True:
-                start_time = time.perf_counter()
-                score_approx, salt = create2_search(
-                    deployer_addr,
-                    initcode_hash,
-                    salt_prefix=salt_prefix,
-                    num_hashes=num_hashes,
-                    threads_per_block=threads_per_block,
-                    hashes_per_thread=hashes_per_thread,
-                )
-
-                elapsed_batch = time.perf_counter() - start_time
-                throughput = num_hashes / elapsed_batch
-
-                elapsed_total = time.perf_counter() - absolute_start_time
-
-                hash = create2_hash(deployer_addr, salt, initcode_hash)
-                score_actual = score_func_uniswap_v4_host(hash)
-
-                address = hash[12:]
-                msg_base = f"{score_approx=} {score_actual=} addr={address.hex()} salt={salt.hex()} [{format_elapsed(elapsed_total)}]"
-                status.update(status=f"{msg_base} [light gray]({throughput:,.0f} hashes/s)")
-
-
-                if score_actual > 0 and score_actual >= best_score:
-                    best_score = score_actual
-                    console.print(f"🏆 {msg_base}")
-                    add_to_log(logfile, f"{score_actual},{address.hex()},{salt.hex()}")
-
-                # uncomment when profiling with ncu
-                # break
-
+            while any(t.is_alive() for t in threads):
+                while not results_queue.empty():
+                    result: BatchResult = results_queue.get()
+                    leaderboard.update(result, status)
     except KeyboardInterrupt:
-        print(f"interrupted after {format_elapsed(time.perf_counter() - absolute_start_time)}")
+        console.print("[red]Interrupted by user.[/red]")
+
+    # Wait for all threads to finish
+    for t in threads:
+        t.join()
 
 
 if __name__ == "__main__":
