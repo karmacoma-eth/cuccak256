@@ -1,8 +1,69 @@
 """SHA3 implementation in Python in functional style"""
 
-import numpy as np
 import time
+from dataclasses import dataclass
+
+import numpy as np
 from numba import cuda, uint8, uint32, uint64
+
+
+@dataclass
+class CudaParams:
+    device_id: int
+    threads_per_block: int
+    hashes_per_thread: int
+
+    @property
+    def mp_count(self) -> int:
+        return cuda.gpus[self.device_id].MULTIPROCESSOR_COUNT
+
+    @property
+    def num_hashes(self) -> int:
+        return self.threads_per_block * self.hashes_per_thread * self.mp_count * 8
+
+
+@dataclass
+class SearchParams:
+    deployer_addr: bytes
+    initcode_hash: bytes
+    salt_prefix: bytes
+
+
+@dataclass
+class BatchResult:
+    approx_score: int
+    salt: bytes
+    elapsed: float
+    cuda_params: CudaParams
+    search_params: SearchParams
+    _hash: bytes | None = None
+    _actual_score: int | None = None
+
+    @property
+    def device_id(self) -> int:
+        return self.cuda_params.device_id
+
+    @property
+    def num_hashes(self) -> int:
+        return self.cuda_params.num_hashes
+
+    @property
+    def throughput(self) -> float:
+        return self.num_hashes / self.elapsed
+
+    @property
+    def hash(self) -> bytes:
+        if self._hash is None:
+            self._hash = create2_hash(self.search_params.deployer_addr, self.salt, self.search_params.initcode_hash)
+        return self._hash
+
+    @property
+    def actual_score(self) -> int:
+        if self._actual_score is None:
+            self._actual_score = score_func_uniswap_v4_host(self.hash)
+        return self._actual_score
+
+
 
 # Keccak round constants
 _KECCAK_RC = np.array(
@@ -506,21 +567,27 @@ def create2_search_kernel(
 
 # host function
 def create2_search(
-    deployer_addr: bytes,
-    initcode_hash: bytes,
-    salt_prefix: bytes = b"\x00" * 20,
-    num_hashes: int = 2**20,
-    threads_per_block=256,
-    hashes_per_thread=256,
-) -> tuple[int, bytes]:
+    cuda_params: CudaParams,
+    search_params: SearchParams,
+) -> BatchResult:
+    start_time = time.perf_counter()
+
+    num_hashes = search_params.num_hashes
+    hashes_per_thread = search_params.hashes_per_thread
+    threads_per_block = cuda_params.threads_per_block
+
     # Calculate total number of threads and blocks
     total_threads = (num_hashes + hashes_per_thread - 1) // hashes_per_thread
     blocks_per_grid = (total_threads + threads_per_block - 1) // threads_per_block
 
     # Prepare input
+    salt_prefix = search_params.salt_prefix
+    deployer_addr = search_params.deployer_addr
+    initcode_hash = search_params.initcode_hash
     assert len(salt_prefix) == 20
     run_id = int(time.time()).to_bytes(4, "big")
 
+    # XXX update with device ID
     input_template = (
         b"\xff" + deployer_addr + salt_prefix + run_id + b"\x00" * 8 + initcode_hash
     )
@@ -534,6 +601,7 @@ def create2_search(
     best_salts_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.uint64)
 
     # Launch the kernel
+    # TODO: verify the device ID
     create2_search_kernel[blocks_per_grid, threads_per_block](
         input_template_d,
         hashes_per_thread,
@@ -555,7 +623,13 @@ def create2_search(
 
     full_salt = salt_prefix + run_id + int(best_salt).to_bytes(8, "big")
     assert len(full_salt) == 32
-    return int(best_score), full_salt
+    return BatchResult(
+        approx_score=best_score,
+        salt=full_salt,
+        elapsed=time.perf_counter() - start_time,
+        cuda_params=cuda_params,
+        search_params=search_params,
+    )
 
 
 def create2_helper(deployer_addr: bytes, salt: bytes, initcode_hash: bytes) -> bytes:

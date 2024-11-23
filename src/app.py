@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-from dataclasses import dataclass
 from multiprocessing import Queue
 from threading import Thread
 
@@ -13,6 +12,7 @@ from rich.live import Live
 from rich.table import Table
 
 from keccak256_numba import keccak256
+from create2_cuda import BatchResult, CudaParams, SearchParams, create2_search
 
 console = Console()
 
@@ -222,62 +222,6 @@ def format_elapsed(elapsed: float) -> str:
     return f"{hours:02d}h{minutes:02d}m{seconds:05.2f}s"
 
 
-@dataclass
-class CudaParams:
-    device_id: int
-    threads_per_block: int
-    hashes_per_thread: int
-
-    @property
-    def mp_count(self) -> int:
-        return cuda.gpus[self.device_id].MULTIPROCESSOR_COUNT
-
-    @property
-    def num_hashes(self) -> int:
-        return self.threads_per_block * self.hashes_per_thread * self.mp_count * 8
-
-
-@dataclass
-class SearchParams:
-    deployer_addr: bytes
-    initcode_hash: bytes
-    salt_prefix: bytes
-
-
-@dataclass
-class BatchResult:
-    approx_score: int
-    salt: bytes
-    elapsed: float
-    cuda_params: CudaParams
-    search_params: SearchParams
-    _hash: bytes | None = None
-    _actual_score: int | None = None
-
-    @property
-    def device_id(self) -> int:
-        return self.cuda_params.device_id
-
-    @property
-    def num_hashes(self) -> int:
-        return self.cuda_params.num_hashes
-
-    @property
-    def throughput(self) -> float:
-        return self.num_hashes / self.elapsed
-
-    @property
-    def hash(self) -> bytes:
-        if self._hash is None:
-            self._hash = create2_hash(self.search_params.deployer_addr, self.salt, self.search_params.initcode_hash)
-        return self._hash
-
-    @property
-    def actual_score(self) -> int:
-        if self._actual_score is None:
-            self._actual_score = score_func_uniswap_v4_host(self.hash)
-        return self._actual_score
-
 
 class Leaderboard:
     def __init__(self, num_devices: int):
@@ -338,20 +282,8 @@ def gpu_worker(
     print(f"starting gpu_worker #{cuda_params.device_id}")
     with cuda.gpus[cuda_params.device_id]:
         while True:
-            # fake results for now
-            import random
-
-            time.sleep(random.random() * 10)
-
-            results_queue.put(
-                BatchResult(
-                    approx_score=random.randint(0, 1000),
-                    salt=b"\x00" * 32,
-                    elapsed=random.random(),
-                    cuda_params=cuda_params,
-                    search_params=search_params,
-                )
-            )
+            result = create2_search(cuda_params, search_params)
+            results_queue.put(result)
 
 
 def main():
