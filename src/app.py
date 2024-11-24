@@ -374,7 +374,7 @@ def main():
         cuda_params = CudaParams(
             device_id=device_id,
             threads_per_block=256,
-            hashes_per_thread=2**14,
+            hashes_per_thread=int(os.getenv("HASHES_PER_THREAD", 2**16)),
         )
 
         t = Thread(
