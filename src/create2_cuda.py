@@ -281,23 +281,31 @@ def load_uint64(buf: np.ndarray, offset: int) -> np.uint64:
         uint64: The loaded uint64 value
     """
 
-    uint64_val = uint64(0)
+    result = uint64(0)
     for j in range(8):
-        uint64_val |= uint64(buf[offset + j]) << (j * 8)
-    return uint64_val
+        result |= uint64(buf[offset + j]) << (j * 8)
+    return result
+
+
+@cuda.jit(device=True, inline=True)
+def load_uint64_big_endian(buf: np.ndarray, offset: int) -> np.uint64:
+    result = uint64(0)
+    for i in range(8):
+        result = (result << 8) | uint64(buf[offset + i])
+    return result
 
 
 @cuda.jit(device=True, inline=True)
 def load_uint64_ds_byte(buf: np.ndarray) -> np.uint64:
-    uint64_val = uint64(0)
+    result = uint64(0)
     offset = 80
     for j in range(5):
-        uint64_val |= uint64(buf[offset + j]) << (j * 8)
+        result |= uint64(buf[offset + j]) << (j * 8)
 
     # domain separation byte
-    uint64_val |= uint64(0x01) << 40
+    result |= uint64(0x01) << 40
 
-    return uint64_val
+    return result
 
 
 @cuda.jit(device=True, inline=True)
@@ -409,16 +417,8 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     if hash[12] != 0 or hash[13] != 0:
         return 0
 
-    leading_zero_bits = 16
-
-    next4 = uint32(
-        (uint32(hash[14]) << 24)
-        | (uint32(hash[15]) << 16)
-        | (uint32(hash[16]) << 8)
-        | uint32(hash[17])
-    )
-
-    leading_zero_bits += cuda.clz(next4)
+    next8 = load_uint64_big_endian(hash, 14)
+    leading_zero_bits = 16 + cuda.clz(next8)
     leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
     score = leading_zero_nibbles * 10
 
