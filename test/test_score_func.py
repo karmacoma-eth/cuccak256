@@ -24,34 +24,24 @@ def score_func_uniswap_v4_host(hash: np.ndarray) -> np.int32:
     Note: the address starts at hash[12:]
     """
 
-    # Fast exit if the first 4 bytes are not zero
-    word0 = (
-        (uint32(hash[12]) << 24)
-        | (uint32(hash[13]) << 16)
-        | (uint32(hash[14]) << 8)
-        | uint32(hash[15])
-    )
-    if word0 != 0:
+    # Fast exit if the first 2 bytes are not zero
+    if hash[12] != 0 or hash[13] != 0:
         return 0
 
-    # Count leading zero nibbles starting from byte 4
-    leading_zero_bits = 32  # First 32 bits are zero
+    leading_zero_bits = 16
 
-    # Combine bytes 4-7 into a 32-bit word
-    word1 = (
-        (uint32(hash[16]) << 24)
-        | (uint32(hash[17]) << 16)
-        | (uint32(hash[18]) << 8)
-        | uint32(hash[19])
+    next4 = uint32(
+        (uint32(hash[14]) << 24)
+        | (uint32(hash[15]) << 16)
+        | (uint32(hash[16]) << 8)
+        | uint32(hash[17])
     )
 
-    # Use CUDA clz to count leading zero bits in word1
-    leading_zero_bits += clz(uint32(word1))
+    leading_zero_bits += clz(next4)
     leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
-
     score = leading_zero_nibbles * 10
-    # print(f"{leading_zero_nibbles=} {score=}")
 
+    # 24 is 2x12 (byte offset of the address in the hash)
     nibble_idx = 24 + leading_zero_nibbles
 
     # Check for four consecutive 4s starting at nibble_idx
@@ -68,18 +58,17 @@ def score_func_uniswap_v4_host(hash: np.ndarray) -> np.int32:
     )
     shifted = overextended >> shift_amount
 
-    # Check for four 4s
-    if (shifted & 0xFFFF) != 0x4444:
-        # print(f"no four 4s, worth 0 points {hex(overextended)=}, {hex(shifted)=}")
+    # Check for four consecutive 4s starting at nibble_idx
+    four_fours = (shifted & 0xFFFF) == 0x4444
+    if not four_fours:
         return 0
 
     score += 40
-    # print(f"four 4s, {score=}, {hex(overextended)=}, {hex(shifted)=}")
 
     # Check next nibble
-    next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
-    score += (next_nibble != 0x4) * 20
-    # print(f"next_nibble={hex(next_nibble)} {score=}")
+    next_nibble = (overextended >> (shift_amount - 4)) & 0xF
+    score += (next_nibble != 4) * 20
+    print(f"next_nibble={hex(next_nibble)} {score=}")
 
     # add 1 point for every 4 nibble
     num_fours = 0
@@ -118,6 +107,8 @@ def score_addr(addr_hexstr: str) -> int:
         ("0x000000004444e44Ba6FA1c49573F9c64E3AcAdb1", 148, "basic"),
         ("0x000000000444406D3bBA81Cd60aecDd06166f136", 154, "odd_leading_zero_nibbles"),
         ("0x00000000004444d3cB22EA006470e100Eb014F2D", 166, "lots_of_zeros"),
+        ("0x000000000444441e9ceed846080b0b91992c72f9", 136, "odd nibbles, extra 4 after 4x4s"),
+        ("0x000000004444401e9ceed846080b0b91992c72f9", 126, "even nibbles, extra 4 after 4x4s"),
     ],
 )
 def test_uniswap_v4_score_func(addr_hexstr: str, expected_score: int, desc: str):

@@ -405,10 +405,12 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     Note: the address starts at hash[12:]
     """
 
+    # Fast exit if the first 2 bytes are not zero
     if hash[12] != 0 or hash[13] != 0:
         return 0
 
-    # Fast exit if the first 4 bytes are not zero
+    leading_zero_bits = 16
+
     next4 = uint32(
         (uint32(hash[14]) << 24)
         | (uint32(hash[15]) << 16)
@@ -416,12 +418,11 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
         | uint32(hash[17])
     )
 
-    clz_next4 = cuda.clz(next4)
-    leading_zero_bits = 16 + clz_next4
-
+    leading_zero_bits += cuda.clz(next4)
     leading_zero_nibbles = leading_zero_bits >> 2  # Divide by 4
     score = leading_zero_nibbles * 10
 
+    # 24 is 2x12 (byte offset of the address in the hash)
     nibble_idx = 24 + leading_zero_nibbles
 
     # Check for four consecutive 4s starting at nibble_idx
@@ -446,8 +447,8 @@ def score_func_uniswap_v4(hash: np.ndarray) -> np.int32:
     score += 40
 
     # Check next nibble
-    next_nibble = (overextended & 0xFF) >> (shift_amount - 4)
-    score += (next_nibble != 0x4) * 20
+    next_nibble = (overextended >> (shift_amount - 4)) & 0xF
+    score += (next_nibble != 4) * 20
 
     # NOTE: we don't count the number of 4s in hash on the device to save some time
 
