@@ -37,10 +37,10 @@ class NotificationService:
 
         def send_request():
             try:
-                response = requests.post(self.url, json=payload, timeout=10)
-                print(f"Notification sent: {response.status_code}")
+                # fire and hopefully forget
+                requests.post(self.url, json=payload, timeout=10)
             except Exception as e:
-                print(f"Notification failed: {e}")
+                print(f"warn: notification failed: {e}")
 
         self.executor.submit(send_request)
 
