@@ -5,6 +5,7 @@ from multiprocessing import Queue
 from threading import Thread
 
 import numpy as np
+from dotenv import load_dotenv
 from numba import cuda, uint32
 from rich import print
 from rich.console import Console
@@ -347,6 +348,8 @@ def gpu_worker(
 
 
 def main():
+    load_dotenv()
+
     # Discover available GPUs
     num_devices = len(cuda.gpus)
     if num_devices == 0:
@@ -364,9 +367,15 @@ def main():
             initcode_hash=get_initcode_hash(),
             salt_prefix=get_salt_prefix(),
         )
+        console.print(f"DEPLOYER_ADDR={search_params.deployer_addr.hex()}")
+        console.print(f"INITCODE_HASH={search_params.initcode_hash.hex()}")
+        console.print(f"SALT_PREFIX={search_params.salt_prefix.hex()}")
     except ValueError as e:
         console.print(f"error: {e}")
         sys.exit(1)
+
+    hashes_per_thread = int(os.getenv("HASHES_PER_THREAD", 2**16))
+    console.print(f"HASHES_PER_THREAD={hashes_per_thread}")
 
     # Launch a thread for each GPU
     threads = []
@@ -374,7 +383,7 @@ def main():
         cuda_params = CudaParams(
             device_id=device_id,
             threads_per_block=256,
-            hashes_per_thread=int(os.getenv("HASHES_PER_THREAD", 2**16)),
+            hashes_per_thread=hashes_per_thread,
         )
 
         t = Thread(
