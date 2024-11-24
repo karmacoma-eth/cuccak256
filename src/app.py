@@ -311,8 +311,13 @@ class Leaderboard:
         self.latest_results[result.device_id] = result
         live.update(self.generate_table())
 
+        if result.elapsed < 1:
+            # this is bad, because it means we can end up running with the same run id
+            # (results in duplicate/wasted work)
+            console.print(f"warn: {result.device_id} is returning <1s! increase the number of hashes per thread")
+
         actual_score = result.actual_score
-        if actual_score >= self.best_score:
+        if actual_score >= self.best_score and actual_score > 0:
             self.best_score = actual_score
             self._add_to_log(
                 f"{actual_score},0x{result.address.hex()},{result.salt.hex()}"
@@ -320,8 +325,8 @@ class Leaderboard:
 
             elapsed_total = time.perf_counter() - self.absolute_start_time
             msg = f"score={result.approx_score}/{actual_score}"
-            msg += f" salt={result.salt.hex()}"
             msg += f" addr=0x{result.address.hex()}"
+            msg += f" salt={result.salt.hex()}"
             msg += f" device={result.device_id}"
             msg += f" [{format_elapsed(elapsed_total)}]"
             console.print(f"  {msg}")
@@ -332,7 +337,6 @@ def gpu_worker(
     search_params: SearchParams,
     results_queue: Queue,
 ):
-    print(f"starting gpu_worker #{cuda_params.device_id}")
     with cuda.gpus[cuda_params.device_id]:
         while True:
             result = create2_search(cuda_params, search_params)
@@ -345,6 +349,8 @@ def main():
     if num_devices == 0:
         console.print("error: no CUDA devices found")
         sys.exit(1)
+
+    print(f"starting {num_devices} GPU workers")
 
     # Shared queue for results
     results_queue = Queue()
@@ -381,7 +387,7 @@ def main():
         threads.append(t)
 
     leaderboard = Leaderboard(num_devices)
-    console.print(f"writing interesting results to {leaderboard.logfile}")
+    console.print(f"writing interesting results to [yellow]{leaderboard.logfile}[/yellow]")
 
     # Monitor status updates
     try:

@@ -497,12 +497,12 @@ def create2_search_kernel(
         data[i] = input_template[i]
 
     # write block index as a 2-byte big endian integer
-    data[45] = (block_index >> 8) & 0xFF
-    data[46] = block_index & 0xFF
+    data[46] = (block_index >> 8) & 0xFF
+    data[47] = block_index & 0xFF
 
     # write thread index as a 2-byte big endian integer
-    data[47] = (thread_index >> 8) & 0xFF
-    data[48] = thread_index & 0xFF
+    data[48] = (thread_index >> 8) & 0xFF
+    data[49] = thread_index & 0xFF
 
     # allocate local array to store the hash output
     hash_output = cuda.local.array(32, dtype=uint8)
@@ -510,14 +510,12 @@ def create2_search_kernel(
     # allocate local array for the state out of the main loop
     state = cuda.local.array(25, dtype=uint64)
 
-    # global thread id, between 0 and total_number_of_threads
-    for idx in range(hashes_per_thread):
+    # 3-byte hash ID, incremented locally (last 3 bytes of salt)
+    for hid in range(hashes_per_thread):
         # fill in the template:
-        # write idx in big endian at the last 4 bytes of salt
-        data[49] = (idx >> 24) & 0xFF
-        data[50] = (idx >> 16) & 0xFF
-        data[51] = (idx >> 8) & 0xFF
-        data[52] = idx & 0xFF
+        data[50] = (hid >> 16) & 0xFF
+        data[51] = (hid >> 8) & 0xFF
+        data[52] = hid & 0xFF
 
         # Compute hash
         keccak256_single(data, hash_output, state)
@@ -526,10 +524,12 @@ def create2_search_kernel(
         score = score_func_uniswap_v4(hash_output)
         if score > thread_best_score and score > 1:
             thread_best_score = score
+
+            # 7 bytes: block ID (2B), thread ID (2B), hash ID (3B)
             thread_best_salt = (
-                (np.uint64(block_index) << 48)
-                | (np.uint64(thread_index) << 32)
-                | np.uint64(idx)
+                (np.uint64(block_index) << 40)
+                | (np.uint64(thread_index) << 24)
+                | np.uint32(hid)
             )
 
     # Write per-thread best score and salt to block-level shared memory
@@ -575,9 +575,20 @@ def create2_search(
     assert len(salt_prefix) == 20
     run_id = int(time.time()).to_bytes(4, "big")
 
-    # XXX update with device ID
+    # Salt template layout:
+    #   +----------------------+--------+-----+-----+-----+-----+
+    #   |       Prefix         |  RID   | DID | BID | TID | HID |
+    #   |     (20 bytes)       |  (4B)  |(1B) |(2B) |(2B) |(3B)|
+    #   +----------------------+--------+-----+-----+-----+-----+
+    #
+    #   RID: Run ID, based on current timestamp (4 bytes)
+    #   DID: Device ID (1 byte)
+    #   BID: Block ID (2 bytes)
+    #   TID: Thread ID (2 bytes)
+    #   HID: Hash ID, just a counter incremented by each GPU thread (3 bytes)
+    did = cuda_params.device_id.to_bytes(1, "big")
     input_template = (
-        b"\xff" + deployer_addr + salt_prefix + run_id + b"\x00" * 8 + initcode_hash
+        b"\xff" + deployer_addr + salt_prefix + run_id + did + b"\x00" * 7 + initcode_hash
     )
     assert len(input_template) == 85
 
@@ -588,8 +599,12 @@ def create2_search(
     best_scores_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.int32)
     best_salts_d = cuda.device_array(shape=(blocks_per_grid,), dtype=np.uint64)
 
+    # Verify the device ID
+    current_device_id = cuda.current_context().device.id
+    if cuda_params.device_id != current_device_id:
+        print(f"warn: expected device ID {cuda_params.device_id}, got {current_device_id}")
+
     # Launch the kernel
-    # TODO: verify the device ID
     create2_search_kernel[blocks_per_grid, threads_per_block](
         input_template_d,
         hashes_per_thread,
@@ -609,7 +624,7 @@ def create2_search(
             best_score = best_scores_h[i]
             best_salt = best_salts_h[i]
 
-    full_salt = salt_prefix + run_id + int(best_salt).to_bytes(8, "big")
+    full_salt = salt_prefix + run_id + did + int(best_salt).to_bytes(7, "big")
     assert len(full_salt) == 32
     return BatchResult(
         approx_score=best_score,
