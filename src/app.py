@@ -415,6 +415,7 @@ def main():
         threads.append(t)
 
     webhook_url = os.getenv("WEBHOOK_URL")
+    console.print(f"WEBHOOK_URL={webhook_url}")
     notifications = NotificationService.configure(
         url=webhook_url,
         max_workers=1,
@@ -423,6 +424,7 @@ def main():
 
     # only notify if the score is above this threshold
     notif_threshold = int(os.getenv("NOTIFICATION_THRESHOLD", 0))
+    console.print(f"NOTIFICATION_THRESHOLD={notif_threshold}")
     leaderboard = Leaderboard(num_devices, notifications, notif_threshold)
     console.print(f"writing interesting results to [yellow]{leaderboard.logfile}")
 
