@@ -14,6 +14,7 @@ from rich.table import Table
 
 from keccak256_numba import keccak256
 from create2_cuda import BatchResult, CudaParams, SearchParams, create2_search
+from notifications import NotificationService
 
 console = Console()
 
@@ -263,7 +264,7 @@ class HostSideResult:
 
 
 class Leaderboard:
-    def __init__(self, num_devices: int):
+    def __init__(self, num_devices: int, notifications: NotificationService, notif_threshold: int):
         self.best_score = 0
         self.best_address = b"\x00" * 20
         self.best_salt = b"\x00" * 32
@@ -273,6 +274,8 @@ class Leaderboard:
         self.absolute_start_time = time.perf_counter()
         self.logfile = f"log-{time.strftime('%Y%m%d%H%M%S')}.txt"
         self._add_to_log("score,address,salt")
+        self.notifications = notifications
+        self.notif_threshold = notif_threshold
 
     def _add_to_log(self, msg: str):
         with open(self.logfile, "a") as f:
@@ -322,7 +325,6 @@ class Leaderboard:
 
         actual_score = result.actual_score
         if actual_score >= self.best_score and actual_score > 0:
-            self.best_score = actual_score
             self._add_to_log(
                 f"{actual_score},0x{result.address.hex()},{result.salt.hex()}"
             )
@@ -334,6 +336,20 @@ class Leaderboard:
             msg += f" device={result.device_id}"
             msg += f" [{format_elapsed(elapsed_total)}]"
             console.print(f"  {msg}")
+
+            # only notify if the score is above the threshold and is a strict new best
+            if actual_score > self.best_score and actual_score > self.notif_threshold:
+                self.notifications.post(
+                    {
+                        "score": actual_score,
+                        "address": result.address.hex(),
+                        "salt": result.salt.hex(),
+                        "elapsed": format_elapsed(elapsed_total),
+                    }
+                )
+
+            self.best_score = actual_score
+
 
 
 def gpu_worker(
@@ -398,7 +414,16 @@ def main():
         t.start()
         threads.append(t)
 
-    leaderboard = Leaderboard(num_devices)
+    webhook_url = os.getenv("WEBHOOK_URL")
+    notifications = NotificationService.configure(
+        url=webhook_url,
+        max_workers=1,
+        enabled=bool(webhook_url),
+    )
+
+    # only notify if the score is above this threshold
+    notif_threshold = int(os.getenv("NOTIFICATION_THRESHOLD", 0))
+    leaderboard = Leaderboard(num_devices, notifications, notif_threshold)
     console.print(f"writing interesting results to [yellow]{leaderboard.logfile}")
 
     # Monitor status updates
