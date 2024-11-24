@@ -284,15 +284,17 @@ class Leaderboard:
         table.add_column("address", min_width=42)
         table.add_column("salt", min_width=64)
         table.add_column("throughput", min_width=10)
+        table.add_column("elapsed")
 
         for i, result in enumerate(self.latest_results):
             if result is None:
                 table.add_row(
                     f"{i}",
-                    "[gray]n/a[/gray]",
-                    "[gray]n/a[/gray]",
-                    "[gray]n/a[/gray]",
-                    "[gray]n/a[/gray]",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    "-",
                 )
                 continue
 
@@ -303,6 +305,7 @@ class Leaderboard:
                 f"0x{result.address.hex()}",
                 f"{result.salt.hex()}",
                 f"{throughput / 1e6:,.0f} Mh/s",
+                f"{result.elapsed:.2f}s",
             )
         return table
 
@@ -314,7 +317,7 @@ class Leaderboard:
         if result.elapsed < 1:
             # this is bad, because it means we can end up running with the same run id
             # (results in duplicate/wasted work)
-            console.print(f"warn: {result.device_id} is returning <1s! increase the number of hashes per thread")
+            console.print(f"warn: {result.device_id} is returning <1s! (wasting work)")
 
         actual_score = result.actual_score
         if actual_score >= self.best_score and actual_score > 0:
@@ -387,7 +390,7 @@ def main():
         threads.append(t)
 
     leaderboard = Leaderboard(num_devices)
-    console.print(f"writing interesting results to [yellow]{leaderboard.logfile}[/yellow]")
+    console.print(f"writing interesting results to [yellow]{leaderboard.logfile}")
 
     # Monitor status updates
     try:
